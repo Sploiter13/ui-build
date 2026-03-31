@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UI Builder — Severe</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="titlebar">
+  <div class="brand">
+    <div class="hex"></div>
+    UI BUILDER
+  </div>
+  <div class="vs"></div>
+  <button class="btn" onclick="newProject()">New</button>
+  <button class="btn" onclick="saveJSON()">Save</button>
+  <button class="btn" onclick="fli.click()">Load</button>
+  <input type="file" id="fli" style="display:none" accept=".json" onchange="loadJSON(event)">
+  <button class="btn" onclick="showSett(event)" title="Settings">&#x2699;</button>
+  <div class="vs"></div>
+  <button class="btn g" onclick="genShow()">&#x27E8;/&#x27E9; Lua</button>
+  <div class="vs"></div>
+  <button class="btn" onclick="undo()" title="Undo (Ctrl+Z)">&#x21A9;</button>
+  <button class="btn" onclick="redo()" title="Redo (Ctrl+Y)">&#x21AA;</button>
+  <div style="flex:1"></div>
+  <span style="font-size:10px;color:var(--t2)">Canvas</span>
+  <input id="icw" type="number" class="ni" value="1920" onchange="resizeCV()">
+  <span style="color:var(--t2);font-size:11px">&#xD7;</span>
+  <input id="ich" type="number" class="ni" value="1080" onchange="resizeCV()">
+  <div class="vs"></div>
+  <button class="btn" onclick="doZoom(1.2)" title="Zoom In">+</button>
+  <span class="zl" id="zll">50%</span>
+  <button class="btn" onclick="doZoom(.833)" title="Zoom Out">&#x2212;</button>
+  <button class="btn" onclick="zFit()" title="Fit to window">Fit</button>
+</div>
+
+<div id="main">
+
+  <div id="left">
+    <div class="sh">Drawing</div>
+    <div id="toolbox">
+      <button class="tool act" data-t="sel"      onclick="setTool('sel')">       <span class="ti">&#x2196;</span>Select</button>
+      <button class="tool"     data-t="Square"   onclick="setTool('Square')">    <span class="ti">&#x25AD;</span>Square</button>
+      <button class="tool"     data-t="Circle"   onclick="setTool('Circle')">    <span class="ti">&#x25EF;</span>Circle</button>
+      <button class="tool"     data-t="Text"     onclick="setTool('Text')">      <span class="ti">Aa</span>Text</button>
+      <button class="tool"     data-t="Line"     onclick="setTool('Line')">      <span class="ti">&#x2571;</span>Line</button>
+      <button class="tool"     data-t="Polyline" onclick="setTool('Polyline')">  <span class="ti">&#x2307;</span>Polyline</button>
+      <button class="tool"     data-t="Triangle" onclick="setTool('Triangle')">  <span class="ti">&#x25B3;</span>Triangle</button>
+      <button class="tool"     data-t="Image"    onclick="setTool('Image')" style="display:none"><span class="ti">&#x2B1A;</span>Image</button>
+    </div>
+
+    <div class="sh" style="color:var(--pur)">UI Widgets</div>
+    <div id="toolbox2">
+      <button class="tool ui" data-t="Checkbox"  onclick="setTool('Checkbox')">  <span class="ti">&#x2611;</span>Checkbox</button>
+      <button class="tool ui" data-t="Keybind"   onclick="setTool('Keybind')">   <span class="ti">&#x2328;</span>Keybind</button>
+      <button class="tool ui" data-t="Dropdown"  onclick="setTool('Dropdown')">  <span class="ti">&#x25BC;</span>Dropdown</button>
+      <button class="tool ui" data-t="Slider"    onclick="setTool('Slider')">    <span class="ti">&#x25C8;</span>Slider</button>
+      <button class="tool ui" data-t="Button"    onclick="setTool('Button')">    <span class="ti">&#x2B2D;</span>Button</button>
+    </div>
+
+    <div class="sh" style="padding-bottom:0;border-bottom:none">
+      Tabs
+      <button class="shb" onclick="addTab()" title="New tab">+</button>
+    </div>
+    <div id="tabbar"><div id="tablist"></div></div>
+
+    <div class="sh">
+      Layers
+      <span style="color:var(--t3);font-size:9px;margin-left:4px">(Z&#x2191;=front)</span>
+      <button class="shb" onclick="delSel()" title="Delete selected">&#x2715;</button>
+    </div>
+    <div id="layers"></div>
+  </div>
+
+  <div id="cvwrap">
+    <canvas id="cv" width="1920" height="1080"></canvas>
+  </div>
+
+  <div id="right">
+    <div class="rtabs">
+      <div class="rtab act" id="tp" onclick="switchTab('p')">Properties</div>
+      <div class="rtab"     id="tc" onclick="switchTab('c')">Code</div>
+    </div>
+
+    <div id="pw" class="on">
+      <div id="pi">
+        <div class="mt">
+          <em>&#x25C7;</em>
+          Select an element<br>to edit properties
+        </div>
+      </div>
+    </div>
+
+    <div id="cw">
+      <div id="ci">
+        <div class="cbr">
+          <button class="btn" style="flex:1" onclick="genShow()">Regen</button>
+          <button class="btn g" onclick="copyCode()">Copy</button>
+        </div>
+        <textarea id="co" readonly spellcheck="false"></textarea>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div id="sbar">
+  <span>Els: <span class="sv" id="sc">0</span></span>
+  <span>Sel: <span class="sv" id="ss">0</span></span>
+  <span>Cursor: <span class="sv" id="sm">0, 0</span></span>
+  <div style="flex:1"></div>
+  <span style="color:var(--t3)">v4 &middot; Static Mode &middot; Checkbox / Keybind / Dropdown / Slider / Button</span>
+</div>
+
+<div id="ctx">
+  <div class="ci" onclick="ctxDo('setParent')">&#x1F517; Parent selected to this</div>
+  <div class="ci" onclick="ctxDo('unparent')">&#x26D3; Unparent selected</div>
+  <hr class="csep">
+  <div class="ci" onclick="ctxDo('front')">&#x2B06; Bring to Front</div>
+  <div class="ci" onclick="ctxDo('back')">&#x2B07; Send to Back</div>
+  <hr class="csep">
+  <div class="ci" onclick="ctxDo('dup')">&#x29C9; Duplicate &nbsp; Ctrl+D</div>
+  <div class="ci" onclick="ctxDo('copy')">Copy &nbsp; Ctrl+C</div>
+  <div class="ci" onclick="ctxDo('paste')">Paste &nbsp; Ctrl+V</div>
+  <hr class="csep">
+  <div class="ci red" onclick="ctxDo('del')">Delete</div>
+</div>
+
+<div id="toast"></div>
+
+<div id="sett">
+  <div class="sett-head">
+    <span>Settings</span>
+    <button class="sett-x" onclick="hideSett()">&#x2715;</button>
+  </div>
+
+  <div class="sg">INTERFACE</div>
+  <div class="sr"><span class="sl">Font Size</span>
+    <select class="si" onchange="setSett('fontSize',+this.value)">
+      <option value="10">10px</option>
+      <option value="11">11px</option>
+      <option value="12">12px</option>
+      <option value="13">13px</option>
+      <option value="14">14px</option>
+    </select>
+  </div>
+  <div class="sr"><span class="sl">Font</span>
+    <select class="si" onchange="setSett('font',this.value)">
+      <option value="JetBrains Mono">JetBrains Mono</option>
+      <option value="Consolas">Consolas</option>
+      <option value="Courier New">Courier New</option>
+      <option value="monospace">System Mono</option>
+    </select>
+  </div>
+  <div class="sr"><span class="sl">Compact UI</span>
+    <input type="checkbox" class="si-chk" onchange="setSett('compact',this.checked)">
+  </div>
+
+  <div class="sg">CANVAS</div>
+  <div class="sr"><span class="sl">Show Grid</span>
+    <input type="checkbox" class="si-chk" onchange="setSett('showGrid',this.checked)">
+  </div>
+  <div class="sr"><span class="sl">Grid Size</span>
+    <select class="si" onchange="setSett('gridSize',+this.value)">
+      <option value="16">16px</option>
+      <option value="24">24px</option>
+      <option value="32">32px</option>
+      <option value="48">48px</option>
+    </select>
+  </div>
+  <div class="sr"><span class="sl">Snap Distance</span>
+    <select class="si" onchange="setSett('snapDist',+this.value)">
+      <option value="4">4px</option>
+      <option value="6">6px</option>
+      <option value="7">7px (default)</option>
+      <option value="10">10px</option>
+      <option value="16">16px</option>
+      <option value="0">Off</option>
+    </select>
+  </div>
+
+  <div class="sg">PANELS</div>
+  <div class="sr"><span class="sl">Left Width</span>
+    <input type="number" class="si" min="140" max="320" step="10"
+      onchange="setSett('leftWidth',+this.value)">
+  </div>
+  <div class="sr"><span class="sl">Right Width</span>
+    <input type="number" class="si" min="180" max="380" step="10"
+      onchange="setSett('rightWidth',+this.value)">
+  </div>
+
+  <div class="sg">ACCENT COLOR</div>
+  <div class="saccents" id="saccents"></div>
+
+  <div style="padding:10px 12px;border-top:1px solid var(--b);margin-top:4px">
+    <button class="btn" style="width:100%;font-size:10px" onclick="resetSett()">Reset to Defaults</button>
+  </div>
+</div>
+
+<script src="state.js"></script>
+<script src="elements.js"></script>
+<script src="canvas.js"></script>
+<script src="interaction.js"></script>
+<script src="properties.js"></script>
+<script src="codegen.js"></script>
+</body>
+</html>
