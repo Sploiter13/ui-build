@@ -223,6 +223,7 @@ function updateProps() {
       ['playerName', 'Player Name'],
       ['tabName', 'Active Tab Name'],
       ['clock', 'Clock (HH:MM:SS)'],
+      ['runtime', 'Runtime (MM:SS)'],
       ['custom', 'Custom Lua Expr'],
       ...keybinds.map(kb => [`keybind:${kb.id}`, `Keybind → ${esc(kb.name || kb.id)}`]),
     ].map(([v, l]) => `<option value="${v}"${dynSrc === v ? ' selected' : ''}>${l}</option>`).join('');
@@ -310,6 +311,16 @@ function updateProps() {
           </div>`;
     h += `<div class="info">One option per comma. Default Index is 0-based (0 = first option)</div>`;
     h += r('Default Index', num('defaultIndex', 0));
+    h += `<div class="pr"><span class="pl">Dynamic Options</span>
+            <textarea class="ta" rows="3"
+              placeholder="Leave blank for static options.&#10;Lua expr returning {string}, e.g.:&#10;(function() local t={} for _,c in ipairs(workspace:GetChildren()) do t[#t+1]=c.Name end return t end)()"
+              onchange="sp('${el.id}','dynamicOptions',this.value)">${esc(el.dynamicOptions||'')}</textarea>
+          </div>`;
+    if (el.dynamicOptions && el.dynamicOptions.trim()) {
+      h += `<div class="info">Options refresh each time the dropdown opens. Static list above is ignored at runtime.</div>`;
+      h += r('Max Slots', `<input class="pi" type="number" min="1" max="100" value="${el.maxOptions||20}" onchange="sp('${el.id}','maxOptions',+this.value)">`);
+      h += `<div class="info">Pre-allocates Drawing slots. Set to the max number of items the expression can return.</div>`;
+    }
     h += r('Text Size',   num('textSize', 4));
     h += r('Text Color',  crow('textColor'));
     h += r('Text Outline',chk('textOutline'));
