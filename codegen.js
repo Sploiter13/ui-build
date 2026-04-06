@@ -238,6 +238,7 @@ function genLua() {
   const dynTextEls      = sorted.filter(e => e.type === 'Text' && e.dynamicSource && e.dynamicSource !== '');
   const hasDynText      = dynTextEls.length > 0;
   const needsTabNames   = dynTextEls.some(e => e.dynamicSource === 'tabName');
+  const hasRuntimeText  = dynTextEls.some(e => e.dynamicSource === 'runtime');
   const needsInteractive = hasDrag || hasCB || hasKB || hasDD || hasSL || hasBT;
   const needsInput      = needsInteractive || hasDynText;
   const draggables = sorted.filter(e => e.type === 'Square' && e.draggable);
@@ -310,15 +311,18 @@ function genLua() {
         L.push(`E.${v}WaitReady   = false`);
         break;
       case 'Dropdown': {
-        const opts   = (el.options || 'Option 1').split(',').map(o => o.trim());
-        const defIdx = Math.max(0, Math.min(opts.length - 1, el.defaultIndex || 0));
+        const opts      = (el.options || 'Option 1').split(',').map(o => o.trim());
+        const defIdx    = Math.max(0, Math.min(opts.length - 1, el.defaultIndex || 0));
+        const isDynDD   = !!(el.dynamicOptions && el.dynamicOptions.trim());
+        const slotCount = isDynDD ? (el.maxOptions || 20) : opts.length;
         L.push(`E.${v}Background = Drawing.new("Square")`);
         L.push(`E.${v}Text       = Drawing.new("Text")`);
         L.push(`E.${v}Arrow      = Drawing.new("Text")`);
         L.push(`E.${v}Selected   = "${opts[defIdx]}"`);
         L.push(`E.${v}Options    = { ${opts.map(o => `"${o}"`).join(', ')} }`);
         L.push(`E.${v}Open       = false`);
-        for (let i = 0; i < opts.length; i++) {
+        if (isDynDD) L.push(`E.${v}SlotCount = 0`);
+        for (let i = 0; i < slotCount; i++) {
           L.push(`E.${v}OptionBackground${i} = Drawing.new("Square")`);
           L.push(`E.${v}OptionText${i}       = Drawing.new("Text")`);
         }
@@ -388,11 +392,13 @@ function genLua() {
               L.push(`    E.${v}Text.Visible       = ${g} and ${vis}`);
               break;
             case 'Dropdown': {
-              const opts = (el.options || 'Option 1').split(',').map(o => o.trim());
+              const opts      = (el.options || 'Option 1').split(',').map(o => o.trim());
+              const isDynDD   = !!(el.dynamicOptions && el.dynamicOptions.trim());
+              const slotCount = isDynDD ? (el.maxOptions || 20) : opts.length;
               L.push(`    E.${v}Background.Visible = ${g} and ${vis}`);
               L.push(`    E.${v}Text.Visible       = ${g} and ${vis}`);
               L.push(`    E.${v}Arrow.Visible      = ${g} and ${vis}`);
-              for (let oi = 0; oi < opts.length; oi++) {
+              for (let oi = 0; oi < slotCount; oi++) {
                 L.push(`    E.${v}OptionBackground${oi}.Visible = ${g} and E.${v}Open`);
                 L.push(`    E.${v}OptionText${oi}.Visible       = ${g} and E.${v}Open`);
               }
@@ -624,7 +630,9 @@ function genLua() {
         L.push(`    E.${v}Arrow.ZIndex   = ${z + 1}`);
         L.push(`    E.${v}Arrow.Visible  = ${!!el.visible}`);
 
-        for (let i = 0; i < opts.length; i++) {
+        const isDynDD3   = !!(el.dynamicOptions && el.dynamicOptions.trim());
+        const slotCount3 = isDynDD3 ? (el.maxOptions || 20) : opts.length;
+        for (let i = 0; i < slotCount3; i++) {
           const ory = Math.round(b.y + el.h * (i + 1));
           const oty = Math.round(b.y + el.h * (i + 1) + el.h/2 - (el.textSize || 16)/2);
           L.push('');
@@ -637,7 +645,7 @@ function genLua() {
           L.push(`    E.${v}OptionBackground${i}.Visible   = false`);
           L.push('');
           L.push(`    E.${v}OptionText${i}.Position  = ${v2(Math.round(b.x + 8), oty)}`);
-          L.push(`    E.${v}OptionText${i}.Text      = "${opts[i]}"`);
+          L.push(`    E.${v}OptionText${i}.Text      = "${isDynDD3 ? '' : opts[i] || ''}"`);
           L.push(`    E.${v}OptionText${i}.Size      = ${el.textSize || 16}`);
           L.push(`    E.${v}OptionText${i}.Font      = ${el.font || 0}`);
           L.push(`    E.${v}OptionText${i}.Color     = ${c3(el.textColor || '#000000')}`);
@@ -723,11 +731,38 @@ function genLua() {
   L.push('end');
 
   // ── PreLocal / PostLocal / Render ───────────────────────────
+  // Helper: emit dynamic-text assignments (used in PreLocal so memory reads run every game tick)
+  const emitDynTextLines = (indent) => {
+    for (const el of dynTextEls) {
+      const v   = vn(el);
+      const src = el.dynamicSource || '';
+      if (src.startsWith('keybind:')) {
+        const kbEl = sorted.find(e => e.id === src.slice('keybind:'.length));
+        if (kbEl) {
+          const kv = vn(kbEl);
+          L.push(`${indent}E.${v}.Text = if E.${kv}Waiting then "[...]" else "[" .. E.${kv}Key .. "]"`);
+        }
+      } else if (src === 'playerName') {
+        L.push(`${indent}E.${v}.Text = game.Players.LocalPlayer.Name`);
+      } else if (src === 'tabName') {
+        L.push(`${indent}E.${v}.Text = TabNames[ActiveTab] or ""`);
+      } else if (src === 'clock') {
+        L.push(`${indent}E.${v}.Text = os.date("%H:%M:%S")`);
+      } else if (src === 'runtime') {
+        L.push(`${indent}if _T0 == 0 then _T0 = tick() end`);
+        L.push(`${indent}E.${v}.Text = string.format("%02d:%02d", math.floor((tick()-_T0)/60), math.floor(tick()-_T0)%60)`);
+      } else if (src === 'custom' && (el.dynamicExpr || '').trim()) {
+        L.push(`${indent}E.${v}.Text = tostring(${el.dynamicExpr.trim()})`);
+      }
+    }
+  };
+
   if (needsInput) {
     const needsMouse    = hasBT || hasDrag || hasSwitchTabAction;
 
     L.push('');
     L.push('do');
+    if (hasRuntimeText) L.push('    local _T0: number = 0 -- set on first PreLocal tick');
     if (needsInteractive) {
       L.push('    local PrevLeftPressed: boolean = false');
       if (hasKB) L.push('    local PrevKeys: {string} = {}');
@@ -881,32 +916,65 @@ function genLua() {
     }
 
     for (const el of sorted.filter(e => e.type === 'Dropdown')) {
-      const v    = vn(el);
-      const opts = (el.options || 'Option 1').split(',').map(o => o.trim());
-      const N    = opts.length;
-      const tg   = (multiTab && !el.shared) ? `ActiveTab == ${tabIdx(el)} and ` : '';
-      L.push(`        if ${tg}LeftClicked then`);
-      L.push(`            do`);
-      L.push(`                local Pos  = E.${v}Background.Position`);
-      L.push(`                local Size = E.${v}Background.Size`);
-      L.push(`                if Mouse.X >= Pos.X and Mouse.X <= Pos.X + Size.X`);
-      L.push(`                and Mouse.Y >= Pos.Y and Mouse.Y <= Pos.Y + Size.Y then`);
-      L.push(`                    E.${v}Open = not E.${v}Open`);
-      L.push(`                end`);
-      L.push(`            end`);
-      for (let i = 0; i < N; i++) {
-        L.push(`            if E.${v}Open then`);
-        L.push(`                local Pos  = E.${v}OptionBackground${i}.Position`);
-        L.push(`                local Size = E.${v}OptionBackground${i}.Size`);
+      const v       = vn(el);
+      const opts    = (el.options || 'Option 1').split(',').map(o => o.trim());
+      const N       = opts.length;
+      const tg      = (multiTab && !el.shared) ? `ActiveTab == ${tabIdx(el)} and ` : '';
+      const isDynDD = !!(el.dynamicOptions && el.dynamicOptions.trim());
+      const slotCnt = isDynDD ? (el.maxOptions || 20) : N;
+      if (isDynDD) {
+        L.push(`        if ${tg}LeftClicked then`);
+        L.push(`            do`);
+        L.push(`                local Pos  = E.${v}Background.Position`);
+        L.push(`                local Size = E.${v}Background.Size`);
         L.push(`                if Mouse.X >= Pos.X and Mouse.X <= Pos.X + Size.X`);
         L.push(`                and Mouse.Y >= Pos.Y and Mouse.Y <= Pos.Y + Size.Y then`);
-        L.push(`                    E.${v}Selected = "${opts[i]}"`);
-        L.push(`                    E.${v}Open     = false`);
-        L.push(`                    On${v}${el.callback}("${opts[i]}", ${i + 1})`);
+        L.push(`                    if not E.${v}Open then`);
+        L.push(`                        E.${v}Options   = ${el.dynamicOptions.trim()}`);
+        L.push(`                        E.${v}SlotCount = math.min(#E.${v}Options, ${slotCnt})`);
+        L.push(`                    end`);
+        L.push(`                    E.${v}Open = not E.${v}Open`);
         L.push(`                end`);
         L.push(`            end`);
+        L.push(`            if E.${v}Open then`);
+        L.push(`                local BgPos  = E.${v}Background.Position`);
+        L.push(`                local BgSize = E.${v}Background.Size`);
+        L.push(`                for _i = 1, E.${v}SlotCount do`);
+        L.push(`                    local SlotY = BgPos.Y + BgSize.Y * _i`);
+        L.push(`                    if Mouse.X >= BgPos.X and Mouse.X <= BgPos.X + BgSize.X`);
+        L.push(`                    and Mouse.Y >= SlotY and Mouse.Y < SlotY + BgSize.Y then`);
+        L.push(`                        E.${v}Selected = E.${v}Options[_i]`);
+        L.push(`                        E.${v}Open     = false`);
+        L.push(`                        On${v}${el.callback}(E.${v}Options[_i], _i)`);
+        L.push(`                        break`);
+        L.push(`                    end`);
+        L.push(`                end`);
+        L.push(`            end`);
+        L.push(`        end`);
+      } else {
+        L.push(`        if ${tg}LeftClicked then`);
+        L.push(`            do`);
+        L.push(`                local Pos  = E.${v}Background.Position`);
+        L.push(`                local Size = E.${v}Background.Size`);
+        L.push(`                if Mouse.X >= Pos.X and Mouse.X <= Pos.X + Size.X`);
+        L.push(`                and Mouse.Y >= Pos.Y and Mouse.Y <= Pos.Y + Size.Y then`);
+        L.push(`                    E.${v}Open = not E.${v}Open`);
+        L.push(`                end`);
+        L.push(`            end`);
+        for (let i = 0; i < N; i++) {
+          L.push(`            if E.${v}Open then`);
+          L.push(`                local Pos  = E.${v}OptionBackground${i}.Position`);
+          L.push(`                local Size = E.${v}OptionBackground${i}.Size`);
+          L.push(`                if Mouse.X >= Pos.X and Mouse.X <= Pos.X + Size.X`);
+          L.push(`                and Mouse.Y >= Pos.Y and Mouse.Y <= Pos.Y + Size.Y then`);
+          L.push(`                    E.${v}Selected = "${opts[i]}"`);
+          L.push(`                    E.${v}Open     = false`);
+          L.push(`                    On${v}${el.callback}("${opts[i]}", ${i + 1})`);
+          L.push(`                end`);
+          L.push(`            end`);
+        }
+        L.push(`        end`);
       }
-      L.push(`        end`);
       L.push('');
     }
 
@@ -1020,6 +1088,10 @@ function genLua() {
 
     if (hasKB) L.push('        PrevKeys        = Keys');
     L.push('        PrevLeftPressed = LeftPressed');
+    if (hasDynText) {
+      L.push('');
+      emitDynTextLines('        ');
+    }
     L.push('    end)');
 
     // ── PostLocal: every-frame bodies with wait() throttle ───
@@ -1043,7 +1115,16 @@ function genLua() {
     } // end needsInteractive
     L.push('');
 
-    // ── Render: drawing updates only ─────────────────────────
+    // ── Standalone PreLocal for pure dynamic text (no interactive elements) ──
+    if (hasDynText && !needsInteractive) {
+      L.push('    RunService.PreLocal:Connect(function()');
+      emitDynTextLines('        ');
+      L.push('    end)');
+      L.push('');
+    }
+
+    // ── Render: drawing updates only (only when there are interactive elements) ──
+    if (needsInteractive) {
     L.push('    RunService.Render:Connect(function()');
     if (needsMouse) {
       L.push('        local Mouse: Vector2 = UserInputService:GetMouseLocation()');
@@ -1066,17 +1147,39 @@ function genLua() {
     if (hasKB) L.push('');
 
     for (const el of sorted.filter(e => e.type === 'Dropdown')) {
-      const v    = vn(el);
-      const opts = (el.options || 'Option 1').split(',').map(o => o.trim());
-      const N    = opts.length;
-      const ti   = tabIdx(el);
+      const v       = vn(el);
+      const opts    = (el.options || 'Option 1').split(',').map(o => o.trim());
+      const N       = opts.length;
+      const ti      = tabIdx(el);
       const tabGate = (multiTab && !el.shared) ? `ActiveTab == ${ti} and ` : '';
       const uiGate  = hasToggleUI ? `UIVisible and ` : '';
-      L.push(`        E.${v}Text.Text  = E.${v}Selected`);
-      L.push(`        E.${v}Arrow.Text = if E.${v}Open then "\u25b2" else "\u25bc"`);
-      for (let i = 0; i < N; i++) {
-        L.push(`        E.${v}OptionBackground${i}.Visible = ${uiGate}${tabGate}E.${v}Open`);
-        L.push(`        E.${v}OptionText${i}.Visible       = ${uiGate}${tabGate}E.${v}Open`);
+      const isDynDD = !!(el.dynamicOptions && el.dynamicOptions.trim());
+      const slotCnt = isDynDD ? (el.maxOptions || 20) : N;
+      if (isDynDD) {
+        L.push(`        do`);
+        L.push(`            local _BgPos  = E.${v}Background.Position`);
+        L.push(`            local _BgSize = E.${v}Background.Size`);
+        L.push(`            E.${v}Text.Text  = E.${v}Selected`);
+        L.push(`            E.${v}Arrow.Text = if E.${v}Open then "\u25b2" else "\u25bc"`);
+        L.push(`            for _i = 1, ${slotCnt} do`);
+        L.push(`                local _show: boolean = ${uiGate}${tabGate}E.${v}Open and _i <= E.${v}SlotCount`);
+        L.push(`                E["${v}OptionBackground" .. tostring(_i - 1)].Visible = _show`);
+        L.push(`                E["${v}OptionText"       .. tostring(_i - 1)].Visible = _show`);
+        L.push(`                if _show then`);
+        L.push(`                    E["${v}OptionBackground" .. tostring(_i - 1)].Position = Vector2.new(_BgPos.X, _BgPos.Y + _BgSize.Y * _i)`);
+        L.push(`                    E["${v}OptionBackground" .. tostring(_i - 1)].Size     = _BgSize`);
+        L.push(`                    E["${v}OptionText"       .. tostring(_i - 1)].Text     = E.${v}Options[_i] or ""`);
+        L.push(`                    E["${v}OptionText"       .. tostring(_i - 1)].Position = Vector2.new(_BgPos.X + 6, _BgPos.Y + _BgSize.Y * _i + 4)`);
+        L.push(`                end`);
+        L.push(`            end`);
+        L.push(`        end`);
+      } else {
+        L.push(`        E.${v}Text.Text  = E.${v}Selected`);
+        L.push(`        E.${v}Arrow.Text = if E.${v}Open then "\u25b2" else "\u25bc"`);
+        for (let i = 0; i < N; i++) {
+          L.push(`        E.${v}OptionBackground${i}.Visible = ${uiGate}${tabGate}E.${v}Open`);
+          L.push(`        E.${v}OptionText${i}.Visible       = ${uiGate}${tabGate}E.${v}Open`);
+        }
       }
       L.push('');
     }
@@ -1152,11 +1255,13 @@ function genLua() {
           L.push(`            E.${kv}Background.Position = NewPos + Vector2.new(${ox}, ${oy})`);
           L.push(`            E.${kv}Text.Position       = NewPos + Vector2.new(${ox + Math.round(kid.w/2)}, ${oy + Math.round(kid.h/2 - (kid.textSize||16)/2)})`);
         } else if (kid.type === 'Dropdown') {
-          const dopts = (kid.options || 'Option 1').split(',').map(o => o.trim());
+          const dopts      = (kid.options || 'Option 1').split(',').map(o => o.trim());
+          const isDynKid   = !!(kid.dynamicOptions && kid.dynamicOptions.trim());
+          const dragSlots  = isDynKid ? (kid.maxOptions || 20) : dopts.length;
           L.push(`            E.${kv}Background.Position = NewPos + Vector2.new(${ox}, ${oy})`);
           L.push(`            E.${kv}Text.Position       = NewPos + Vector2.new(${ox + 8}, ${oy + Math.round(kid.h/2 - (kid.textSize||16)/2)})`);
           L.push(`            E.${kv}Arrow.Position      = NewPos + Vector2.new(${ox + kid.w - 16}, ${oy + Math.round(kid.h/2 - (kid.textSize||16)/2)})`);
-          for (let i = 0; i < dopts.length; i++) {
+          for (let i = 0; i < dragSlots; i++) {
             L.push(`            E.${kv}OptionBackground${i}.Position = NewPos + Vector2.new(${ox}, ${oy + kid.h*(i+1)})`);
             L.push(`            E.${kv}OptionText${i}.Position       = NewPos + Vector2.new(${ox + 8}, ${oy + kid.h*(i+1) + Math.round(kid.h/2 - (kid.textSize||16)/2)})`);
           }
@@ -1196,31 +1301,8 @@ function genLua() {
       L.push('');
     }
 
-    // ── Dynamic Text: live value updates ───────────────────────
-    if (hasDynText) {
-      for (const el of dynTextEls) {
-        const v   = vn(el);
-        const src = el.dynamicSource || '';
-        if (src.startsWith('keybind:')) {
-          const kbEl = sorted.find(e => e.id === src.slice('keybind:'.length));
-          if (kbEl) {
-            const kv = vn(kbEl);
-            L.push(`        E.${v}.Text = if E.${kv}Waiting then "[...]" else "[" .. E.${kv}Key .. "]"`);
-          }
-        } else if (src === 'playerName') {
-          L.push(`        E.${v}.Text = game.Players.LocalPlayer.Name`);
-        } else if (src === 'tabName') {
-          L.push(`        E.${v}.Text = TabNames[ActiveTab] or ""`);
-        } else if (src === 'clock') {
-          L.push(`        E.${v}.Text = os.date("%H:%M:%S")`);
-        } else if (src === 'custom' && (el.dynamicExpr || '').trim()) {
-          L.push(`        E.${v}.Text = tostring(${el.dynamicExpr.trim()})`);
-        }
-      }
-      L.push('');
-    }
-
     L.push('    end)');
+    } // end if (needsInteractive) Render block
     L.push('end');
   } else {
     // no runtime block — close IIFE after init block
