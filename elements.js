@@ -74,6 +74,7 @@ function mkEl(type, x, y) {
       return { ...base, x, y, w: 150, h: 30,
         color: '#ffffff', rounding: 0, filled: true, thickness: 1,
         options: 'Option 1,Option 2,Option 3', defaultIndex: 0,
+        dynamicOptions: '', maxOptions: 20,
         textSize: 16, textColor: '#000000', textOutline: true, font: 2,
         callback: 'Change', callbackBody: '' };
 
