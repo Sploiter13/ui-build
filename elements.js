@@ -197,8 +197,9 @@ function getHandles(el) {
 }
 
 function handleAt(pos, el) {
+  const thresh = 8 / S.zoom;  // 8 screen pixels regardless of zoom
   for (const h of getHandles(el)) {
-    if (Math.abs(pos.x - h.x) < 9 && Math.abs(pos.y - h.y) < 9) return h;
+    if (Math.abs(pos.x - h.x) < thresh && Math.abs(pos.y - h.y) < thresh) return h;
   }
   return null;
 }

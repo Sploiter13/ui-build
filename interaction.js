@@ -28,7 +28,7 @@ function hitTest(pos) {
     if (!el.visible || el.locked) continue;
     if (!el.shared && el.tabId && el.tabId !== S.activeTab) continue;
     const b   = bounds(el);
-    const pad = Math.max(el.thickness || 1, 5);
+    const pad = Math.max(el.thickness || 1, 5 / S.zoom);
 
     if (el.type === 'Circle') {
       // Distance from center; unfilled = ring-only hit zone
@@ -90,25 +90,39 @@ function doSnap(el) {
   if (!el || el.type === 'Line' || el.type === 'Polyline') return;
   const DIST = SETTINGS.snapDist / S.zoom;
   const b    = bounds(el);
+  let snappedX = false, snappedY = false;
   for (const o of S.els) {
     if (o.id === el.id || !o.visible) continue;
     const ob = bounds(o);
-    for (const [a, r] of [
-      [b.x,       ob.x],
-      [b.x,       ob.x + ob.w],
-      [b.x + b.w, ob.x],
-      [b.x + b.w, ob.x + ob.w],
-    ]) {
-      if (Math.abs(a - r) < DIST) { el.x -= (a - r); snaps.push({ x: r }); break; }
+    if (!snappedX) {
+      for (const [a, r] of [
+        [b.x,       ob.x      ],
+        [b.x,       ob.x+ob.w ],
+        [b.x + b.w, ob.x      ],
+        [b.x + b.w, ob.x+ob.w ],
+      ]) {
+        if (Math.abs(a - r) < DIST) {
+          el.x -= (a - r);
+          snaps.push({ x: r, refY: ob.y + ob.h / 2 });
+          snappedX = true; break;
+        }
+      }
     }
-    for (const [a, r] of [
-      [b.y,       ob.y],
-      [b.y,       ob.y + ob.h],
-      [b.y + b.h, ob.y],
-      [b.y + b.h, ob.y + ob.h],
-    ]) {
-      if (Math.abs(a - r) < DIST) { el.y -= (a - r); snaps.push({ y: r }); break; }
+    if (!snappedY) {
+      for (const [a, r] of [
+        [b.y,       ob.y      ],
+        [b.y,       ob.y+ob.h ],
+        [b.y + b.h, ob.y      ],
+        [b.y + b.h, ob.y+ob.h ],
+      ]) {
+        if (Math.abs(a - r) < DIST) {
+          el.y -= (a - r);
+          snaps.push({ y: r, refX: ob.x + ob.w / 2 });
+          snappedY = true; break;
+        }
+      }
     }
+    if (snappedX && snappedY) break;
   }
 }
 
@@ -133,6 +147,15 @@ function topSqAt(pos) {
    MOUSE EVENTS
 ═══════════════════════════════════════════ */
 CV.addEventListener('mousedown', e => {
+  // Middle mouse or Space+left → pan
+  if (e.button === 1 || (e.button === 0 && _spaceDown)) {
+    _panning = true;
+    _panLast = { x: e.clientX, y: e.clientY };
+    CW.style.cursor = 'grabbing';
+    e.preventDefault();
+    return;
+  }
+
   const pos = cvP(e);
 
   // Right-click → context menu
@@ -217,8 +240,8 @@ CV.addEventListener('mousedown', e => {
           : { id, x: el.x, y: el.y }
       );
     }
-    drg = { type: 'move', start: pos, offs };
-    pushH();
+    // pushH deferred to first actual pixel moved (avoids undo entry on plain click)
+    drg = { type: 'move', start: pos, offs, pushed: false };
   } else {
     S.sel.clear();
     _lastHit = null;
@@ -229,31 +252,30 @@ CV.addEventListener('mousedown', e => {
   render();
 });
 
-CV.addEventListener('mousemove', e => {
-  const pos = cvP(e);
-  document.getElementById('sm').textContent = `${Math.round(pos.x)},${Math.round(pos.y)}`;
-
-  if (!drg) {
-    if (S.tool === 'sel') {
-      let cur = 'default';
-      for (const id of S.sel) {
-        const el = S.els.find(e => e.id === id);
-        if (!el) continue;
-        const h = handleAt(pos, el);
-        if (h) { cur = h.cur; break; }
-      }
-      if (cur === 'default' && hitTest(pos)) cur = 'move';
-      CV.style.cursor = cur;
-    } else {
-      CV.style.cursor = 'crosshair';
-    }
+document.addEventListener('mousemove', e => {
+  // Pan
+  if (_panning && _panLast) {
+    _panX += e.clientX - _panLast.x;
+    _panY += e.clientY - _panLast.y;
+    _panLast = { x: e.clientX, y: e.clientY };
+    applyZ();
     return;
   }
+
+  if (!drg) return;
+
+  const pos = cvP(e);
+  // Update cursor position display when dragging
+  document.getElementById('sm').textContent = `${Math.round(pos.x)},${Math.round(pos.y)}`;
 
   const dx = pos.x - drg.start.x;
   const dy = pos.y - drg.start.y;
 
   if (drg.type === 'move') {
+    // Defer history push to first actual movement (avoids undo entry on plain click)
+    if (!drg.pushed && (Math.abs(dx) > 1 || Math.abs(dy) > 1)) {
+      pushH(); drg.pushed = true;
+    }
     for (let i = 0; i < drg.offs.length; i++) {
       const off = drg.offs[i];
       const el = S.els.find(e => e.id === off.id);
@@ -265,7 +287,7 @@ CV.addEventListener('mousemove', e => {
         el.x = off.x + dx;
         el.y = off.y + dy;
       }
-      // Only snap the primary (first) element to avoid guide-line clutter
+      // Only snap the primary (first) element
       if (!e.altKey && i === 0) doSnap(el);
     }
   } else if (drg.type === 'resize') {
@@ -292,8 +314,36 @@ CV.addEventListener('mousemove', e => {
   render();
 });
 
-CV.addEventListener('mouseup',       ()  => { drg = null; updateProps(); });
-CV.addEventListener('contextmenu',   e   => e.preventDefault());
+CV.addEventListener('mousemove', e => {
+  if (_panning || drg) return;  // handled above
+  const pos = cvP(e);
+  document.getElementById('sm').textContent = `${Math.round(pos.x)},${Math.round(pos.y)}`;
+  if (S.tool === 'sel') {
+    let cur = 'default';
+    for (const id of S.sel) {
+      const el = S.els.find(e => e.id === id);
+      if (!el) continue;
+      const h = handleAt(pos, el);
+      if (h) { cur = h.cur; break; }
+    }
+    if (cur === 'default' && hitTest(pos)) cur = 'move';
+    CV.style.cursor = _spaceDown ? 'grab' : cur;
+  } else {
+    CV.style.cursor = 'crosshair';
+  }
+});
+
+document.addEventListener('mouseup', e => {
+  if (_panning) {
+    _panning = false;
+    _panLast = null;
+    CW.style.cursor = _spaceDown ? 'grab' : '';
+    return;
+  }
+  if (drg) { drg = null; updateProps(); }
+});
+
+CV.addEventListener('contextmenu', e => e.preventDefault());
 
 /* ═══════════════════════════════════════════
    CONTEXT MENU

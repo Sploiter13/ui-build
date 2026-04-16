@@ -69,11 +69,19 @@ const S = {
   hist: [],                // Undo stack (serialised JSON strings)
   fut:  [],                // Redo stack
   cnt:  {},                // Per-type name counters
+  drawingMode: 'static',   // 'static' | 'immediate'
 };
 
 // Transient interaction state (not undoable)
 let drg      = null;   // Active drag descriptor
 let clip     = [];     // Clipboard (deep-copied elements)
-let snaps    = [];     // Snap guide lines for current frame
+let snaps    = [];     // Snap guide lines for current frame (at most 1 x + 1 y)
 let ctxEl    = null;   // Element targeted by right-click context menu
 let _lastHit = null;   // ID of last hit-tested element (for click-cycling)
+
+// Pan state
+let _panX      = 0;
+let _panY      = 0;
+let _panning   = false;
+let _panLast   = null;
+let _spaceDown = false;

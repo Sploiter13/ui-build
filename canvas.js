@@ -18,7 +18,7 @@ function resizeCV() {
 }
 
 function applyZ() {
-  CV.style.transform = `translate(-50%,-50%) scale(${S.zoom})`;
+  CV.style.transform = `translate(calc(-50% + ${_panX}px), calc(-50% + ${_panY}px)) scale(${S.zoom})`;
   document.getElementById('zll').textContent = Math.round(S.zoom * 100) + '%';
 }
 
@@ -28,12 +28,36 @@ function doZoom(f) {
 }
 
 function zFit() {
+  _panX = _panY = 0;
   S.zoom = Math.min(
     (CW.clientWidth  - 40) / CV.width,
     (CW.clientHeight - 40) / CV.height
   );
   applyZ();
 }
+
+// Wheel zoom
+CW.addEventListener('wheel', e => {
+  e.preventDefault();
+  doZoom(e.deltaY < 0 ? 1.1 : 0.9);
+}, { passive: false });
+
+// Space + drag pan (middle mouse handled in interaction.js)
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space') {
+    const tag = document.activeElement.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    _spaceDown = true;
+    if (!_panning) CW.style.cursor = 'grab';
+    e.preventDefault();
+  }
+});
+document.addEventListener('keyup', e => {
+  if (e.code === 'Space') {
+    _spaceDown = false;
+    if (!_panning) CW.style.cursor = '';
+  }
+});
 
 /** Convert a mouse event to canvas-space coordinates. */
 function cvP(e) {
@@ -99,13 +123,16 @@ function render() {
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#0b0d15';
   ctx.fillRect(0, 0, W, H);
-  ctx.strokeStyle = 'rgba(255,255,255,.012)';
-  ctx.lineWidth = 1;
-  for (let x = 0; x < W; x += 40) {
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
-  }
-  for (let y = 0; y < H; y += 40) {
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  if (SETTINGS.showGrid) {
+    const gs = SETTINGS.gridSize || 24;
+    ctx.strokeStyle = 'rgba(255,255,255,.015)';
+    ctx.lineWidth = 1;
+    for (let x = 0; x < W; x += gs) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    }
+    for (let y = 0; y < H; y += gs) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    }
   }
 
   // Elements
@@ -402,19 +429,31 @@ function render() {
     }
   }
 
-  // Snap guides
-  ctx.strokeStyle = 'rgba(255,80,200,.5)';
-  ctx.lineWidth   = 1;
-  for (const g of snaps) {
-    ctx.beginPath();
-    if (g.x !== undefined) {
-      ctx.moveTo(g.x, 0); ctx.lineTo(g.x, H);
-    } else {
-      ctx.moveTo(0, g.y); ctx.lineTo(W, g.y);
+  // Snap guides — one x, one y, clipped to element region
+  if (snaps.length) {
+    const selEl = S.els.find(e => S.sel.has(e.id));
+    const sb    = selEl ? bounds(selEl) : null;
+    const ext   = 40; // px extension past element bounds
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,80,200,.65)';
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([4, 3]);
+    for (const g of snaps) {
+      ctx.beginPath();
+      if (g.x !== undefined) {
+        const y1 = sb ? Math.max(0, Math.min(sb.y, g.refY ?? sb.y) - ext) : 0;
+        const y2 = sb ? Math.min(H, Math.max(sb.y + sb.h, g.refY ?? sb.y + sb.h) + ext) : H;
+        ctx.moveTo(g.x, y1); ctx.lineTo(g.x, y2);
+      } else {
+        const x1 = sb ? Math.max(0, Math.min(sb.x, g.refX ?? sb.x) - ext) : 0;
+        const x2 = sb ? Math.min(W, Math.max(sb.x + sb.w, g.refX ?? sb.x + sb.w) + ext) : W;
+        ctx.moveTo(x1, g.y); ctx.lineTo(x2, g.y);
+      }
+      ctx.stroke();
     }
-    ctx.stroke();
+    ctx.restore();
+    snaps = [];
   }
-  snaps = [];
 
   updateStatus();
 }

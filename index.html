@@ -6,6 +6,55 @@
 <title>UI Builder — Severe</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
+<style>
+/* ── TUTORIAL ─────────────────────────── */
+#tut-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9997;
+  pointer-events: all;
+}
+#tut-spot {
+  display: none;
+  position: fixed;
+  z-index: 9998;
+  pointer-events: none;
+  border-radius: 6px;
+  box-shadow: 0 0 0 9999px rgba(0,0,0,.62), 0 0 0 2px var(--acc);
+  transition: left .2s, top .2s, width .2s, height .2s;
+}
+#tut-card {
+  display: none;
+  position: fixed;
+  z-index: 9999;
+  width: 300px;
+  background: var(--panel);
+  border: 1px solid var(--b3);
+  border-top: 2px solid var(--acc);
+  border-radius: 8px;
+  padding: 16px 18px 14px;
+  box-shadow: 0 16px 48px rgba(0,0,0,.7);
+  transition: left .2s, top .2s;
+}
+#tut-step { font-size: 10px; color: var(--t2); margin-bottom: 6px; }
+#tut-title { font-size: 14px; font-weight: 600; color: var(--tb); margin-bottom: 8px; }
+#tut-body { font-size: 12px; color: var(--t); line-height: 1.65; }
+#tut-btns { display: flex; align-items: center; margin-top: 14px; gap: 6px; }
+#tut-skip { background: none; border: none; color: var(--t2); cursor: pointer; font-size: 10px; font-family: var(--f); padding: 0; }
+#tut-skip:hover { color: var(--t); }
+#tut-prev, #tut-next {
+  padding: 4px 12px; border-radius: 4px; cursor: pointer;
+  font-size: 11px; font-family: var(--f);
+  border: 1px solid var(--b3); background: var(--b2); color: var(--tb);
+}
+#tut-next { background: var(--acc); border-color: var(--acc); color: #fff; }
+#tut-prev:hover { border-color: var(--acc); }
+#tut-next:hover { opacity: .85; }
+#tut-dots { display: flex; gap: 5px; align-items: center; margin-right: 4px; }
+.tut-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--b3); transition: background .15s; }
+.tut-dot.act { background: var(--acc); }
+</style>
 </head>
 <body>
 
@@ -26,6 +75,13 @@
   <button class="btn" onclick="undo()" title="Undo (Ctrl+Z)">&#x21A9;</button>
   <button class="btn" onclick="redo()" title="Redo (Ctrl+Y)">&#x21AA;</button>
   <div style="flex:1"></div>
+  <span style="font-size:10px;color:var(--t2)">Mode</span>
+  <select id="si-drawmode-bar" style="background:var(--b2);color:var(--t1);border:1px solid var(--b3);border-radius:3px;font-size:10px;padding:1px 4px;font-family:var(--f);cursor:pointer" onchange="setDrawingMode(this.value)">
+    <option value="static">Static</option>
+    <option value="immediate">Immediate</option>
+  </select>
+  <button class="btn" onclick="tutShow(0)" style="font-size:10px;padding:3px 8px">Tutorial</button>
+  <div class="vs"></div>
   <span style="font-size:10px;color:var(--t2)">Canvas</span>
   <input id="icw" type="number" class="ni" value="1920" onchange="resizeCV()">
   <span style="color:var(--t2);font-size:11px">&#xD7;</span>
@@ -112,7 +168,7 @@
   <span>Sel: <span class="sv" id="ss">0</span></span>
   <span>Cursor: <span class="sv" id="sm">0, 0</span></span>
   <div style="flex:1"></div>
-  <span style="color:var(--t3)">v4 &middot; Static Mode &middot; Checkbox / Keybind / Dropdown / Slider / Button</span>
+  <span id="sbar-mode" style="color:var(--t3)">v4 &middot; Static Mode &middot; Checkbox / Keybind / Dropdown / Slider / Button</span>
 </div>
 
 <div id="ctx">
@@ -192,11 +248,34 @@
       onchange="setSett('rightWidth',+this.value)">
   </div>
 
+  <div class="sg">OUTPUT</div>
+  <div class="sr"><span class="sl">Drawing Mode</span>
+    <select class="si" id="si-drawmode" onchange="setDrawingMode(this.value)">
+      <option value="static">Static (Drawing.new)</option>
+      <option value="immediate">Immediate (DrawingImmediate)</option>
+    </select>
+  </div>
+
   <div class="sg">ACCENT COLOR</div>
   <div class="saccents" id="saccents"></div>
 
   <div style="padding:10px 12px;border-top:1px solid var(--b);margin-top:4px">
     <button class="btn" style="width:100%;font-size:10px" onclick="resetSett()">Reset to Defaults</button>
+  </div>
+</div>
+
+<div id="tut-overlay"></div>
+<div id="tut-spot"></div>
+<div id="tut-card">
+  <div id="tut-step"></div>
+  <div id="tut-title"></div>
+  <div id="tut-body"></div>
+  <div id="tut-btns">
+    <button id="tut-skip" onclick="tutSkip()">Skip tutorial</button>
+    <div style="flex:1"></div>
+    <div id="tut-dots"></div>
+    <button id="tut-prev" onclick="tutPrev()">&#x2190;</button>
+    <button id="tut-next" onclick="tutNext()">Next &#x2192;</button>
   </div>
 </div>
 
@@ -206,5 +285,100 @@
 <script src="interaction.js"></script>
 <script src="properties.js"></script>
 <script src="codegen.js"></script>
+<script>
+/* ── TUTORIAL ─────────────────────────── */
+const TUT_STEPS = [
+  { sel: null,                 title: 'Welcome!',           body: 'Design Roblox drawing UIs visually and get optimized Luau in one click. This takes under a minute to learn.' },
+  { sel: '#toolbox',           title: 'Drawing Tools',      body: 'Pick a shape, then click or drag on the canvas to place it. Square, Circle, Text, Line — all the basics.' },
+  { sel: '#toolbox2',          title: 'UI Widgets',         body: 'Interactive elements: Checkbox, Keybind, Dropdown, Slider, Button. Place them the same way as shapes.' },
+  { sel: '#cvwrap',            title: 'The Canvas',         body: 'Your Roblox screen preview. Scroll to zoom, hold Space + drag to pan. Right-click elements for extra options.' },
+  { sel: '#tabbar',            title: 'Tabs',               body: 'Tabs are separate pages in your UI — like an Aimbot tab and a Visuals tab. Click + to add one. Elements belong to whichever tab was active when placed, or you can mark them Shared so they show on every tab. Use a Keybind or Button with "Switch Tab" action to navigate between them in-game.' },
+  { sel: '#right',             title: 'Widget Scripts',     body: 'Select any widget (Checkbox, Slider, etc.) and open Properties. Scroll down to find the Callback Body — paste your Lua code there. It runs whenever the widget fires: toggle checked, value changed, key pressed, etc. The generated code wraps it in a proper Luau function automatically.' },
+  { sel: '#layers',            title: 'Layers',             body: 'Every element listed here. Click to select, drag to reorder draw order. Higher Z-index = drawn on top.' },
+  { sel: '#right',             title: 'Properties',         body: 'Select any element to edit color, size, text, opacity, and more. Elements can be parented to a Square so they move with it when dragged.' },
+  { sel: '#tc',                title: 'Code Output',        body: 'Click here to see the generated Luau. Hit Copy and paste it straight into your Severe script. Done.' },
+  { sel: '#si-drawmode-bar',   title: 'Drawing Mode',       body: 'Static = Drawing.new (persistent objects). Immediate = DrawingImmediate (redrawn every frame, leaner Render). Both modes generate fully optimized Luau.' },
+];
+
+let _tutIdx = 0;
+
+function tutInit() {
+  if (localStorage.getItem('sevui4_tut')) return;
+  tutShow(0);
+}
+
+function tutShow(idx) {
+  _tutIdx = idx;
+  const step = TUT_STEPS[idx];
+  const n    = TUT_STEPS.length;
+
+  document.getElementById('tut-step').textContent = `${idx + 1} / ${n}`;
+  document.getElementById('tut-title').textContent = step.title;
+  document.getElementById('tut-body').textContent  = step.body;
+  document.getElementById('tut-prev').style.visibility = idx === 0 ? 'hidden' : 'visible';
+  document.getElementById('tut-next').innerHTML = idx === n - 1 ? 'Finish &#x2713;' : 'Next &#x2192;';
+
+  // Dots
+  const dots = document.getElementById('tut-dots');
+  dots.innerHTML = '';
+  for (let i = 0; i < n; i++) {
+    const d = document.createElement('div');
+    d.className = 'tut-dot' + (i === idx ? ' act' : '');
+    dots.appendChild(d);
+  }
+
+  const overlay = document.getElementById('tut-overlay');
+  const spot    = document.getElementById('tut-spot');
+  const card    = document.getElementById('tut-card');
+  overlay.style.display = 'block';
+  card.style.display    = 'block';
+
+  if (!step.sel) {
+    spot.style.display = 'none';
+    card.style.left      = '50%';
+    card.style.top       = '50%';
+    card.style.transform = 'translate(-50%,-50%)';
+    return;
+  }
+
+  const el = document.querySelector(step.sel);
+  if (!el) { spot.style.display = 'none'; return; }
+
+  const pad = 6;
+  const r   = el.getBoundingClientRect();
+  const cW  = 300;
+  const cH  = card.offsetHeight || 175;  // measure actual rendered height
+
+  spot.style.display = 'block';
+  spot.style.left    = (r.left   - pad) + 'px';
+  spot.style.top     = (r.top    - pad) + 'px';
+  spot.style.width   = (r.width  + pad * 2) + 'px';
+  spot.style.height  = (r.height + pad * 2) + 'px';
+
+  card.style.transform = '';
+  const below = window.innerHeight - r.bottom - pad - 12;
+  const cardTop = below >= cH
+    ? r.bottom + pad + 12
+    : Math.max(8, r.top - pad - 12 - cH);
+  const cardLeft = Math.max(8, Math.min(r.left - pad, window.innerWidth - cW - 8));
+  card.style.top  = Math.min(cardTop, window.innerHeight - cH - 8) + 'px';
+  card.style.left = cardLeft + 'px';
+}
+
+function tutNext() {
+  if (_tutIdx >= TUT_STEPS.length - 1) { tutDone(); return; }
+  tutShow(_tutIdx + 1);
+}
+function tutPrev() { if (_tutIdx > 0) tutShow(_tutIdx - 1); }
+function tutSkip() { tutDone(); }
+function tutDone() {
+  localStorage.setItem('sevui4_tut', '1');
+  document.getElementById('tut-overlay').style.display = 'none';
+  document.getElementById('tut-spot').style.display    = 'none';
+  document.getElementById('tut-card').style.display    = 'none';
+}
+
+tutInit();
+</script>
 </body>
 </html>

@@ -230,7 +230,7 @@ function updateProps() {
     h += `<div class="pg"><div class="pgt">Text</div>`;
     h += r('Source', `<select class="pi" onchange="sp('${el.id}','dynamicSource',this.value)">${dynSelOpts}</select>`);
     if (dynSrc === '') h += r('Content', txt('text'));
-    if (dynSrc === 'custom') h += r('Lua Expr', `<input class="pi" value="${esc(el.dynamicExpr || '')}" placeholder="e.g. tostring(workspace.DistributedGameTime)" onchange="sp('${el.id}','dynamicExpr',this.value)">`);
+    if (dynSrc === 'custom') h += r('Lua Expr', `<textarea class="pi" rows="3" placeholder="e.g. tostring(workspace.DistributedGameTime)" onchange="sp('${el.id}','dynamicExpr',this.value)" oninput="sp('${el.id}','dynamicExpr',this.value)" style="resize:vertical;font-family:monospace;font-size:11px;width:100%;box-sizing:border-box">${esc(el.dynamicExpr || '')}</textarea>`);
     h += r('Size',    num('size', 4));
     h += r('Font',    fntSel());
     h += r('Centered', chk('center'));
