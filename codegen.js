@@ -40,7 +40,8 @@ function undo() {
   S.els.filter(e => e.type === 'Image' && e.url).forEach(loadImg);
   S.sel.clear();
   _lastHit = null;
-  updateTabBar(); updateLayers(); updateProps(); render();
+  rebuildCnt();
+  updateTabBar(); updateLayers(); updateProps(); updateCallbacks(); render();
   toast('Undo');
 }
 
@@ -52,7 +53,8 @@ function redo() {
   S.els.filter(e => e.type === 'Image' && e.url).forEach(loadImg);
   S.sel.clear();
   _lastHit = null;
-  updateTabBar(); updateLayers(); updateProps(); render();
+  rebuildCnt();
+  updateTabBar(); updateLayers(); updateProps(); updateCallbacks(); render();
   toast('Redo');
 }
 
@@ -83,7 +85,7 @@ function newProject() {
   S.cnt         = {};
   S.drawingMode = 'static';
   _lastHit      = null;
-  updateTabBar(); updateLayers(); updateProps(); render(); updateModeUI();
+  updateTabBar(); updateLayers(); updateProps(); updateCallbacks(); render(); updateModeUI();
 }
 
 function saveJSON() {
@@ -125,7 +127,7 @@ function loadJSON(ev) {
       if (d.w) { document.getElementById('icw').value = d.w; CV.width  = d.w; }
       if (d.h) { document.getElementById('ich').value = d.h; CV.height = d.h; }
       S.els.filter(e => e.type === 'Image' && e.url).forEach(loadImg);
-      updateTabBar(); updateLayers(); updateProps(); render(); updateModeUI();
+      updateTabBar(); updateLayers(); updateProps(); updateCallbacks(); render(); updateModeUI();
       toast('Loaded!');
     } catch {
       alert('Invalid file.');
@@ -159,13 +161,112 @@ let _codeDirty = true;
 
 function switchTab(t) {
   document.getElementById('pw').classList.toggle('on', t === 'p');
+  document.getElementById('kw').classList.toggle('on', t === 'k');
   document.getElementById('cw').classList.toggle('on', t === 'c');
   document.getElementById('tp').classList.toggle('act', t === 'p');
+  document.getElementById('tk').classList.toggle('act', t === 'k');
   document.getElementById('tc').classList.toggle('act', t === 'c');
+  if (t === 'k') updateCallbacks();
   if (t === 'c' && _codeDirty) {
     document.getElementById('co').value = genLua();
     _codeDirty = false;
   }
+}
+
+/* ═══════════════════════════════════════════
+   CALLBACKS TAB
+   One row per interactive widget that has an editable body.
+   Reads/writes the same `callbackBody` field the Properties panel edits.
+═══════════════════════════════════════════ */
+let _cbFilter = 'all';   // 'all' | 'Checkbox' | 'Keybind' | ...
+let _cbSearch = '';
+
+function updateCallbacks() {
+  const panel = document.getElementById('ki');
+  if (!panel) return;
+  // Skip work when the Callbacks tab isn't visible — `switchTab('k')` calls this
+  // on activation, so the tab always shows fresh content when opened.
+  const wrap = document.getElementById('kw');
+  if (wrap && !wrap.classList.contains('on')) return;
+
+  const tabName = (tabId) => (S.tabs.find(t => t.id === tabId) || {}).name || 'Tab';
+  const rows    = S.els.filter(cbHasBody);
+
+  // header + filter chips
+  const chip = (key, label) =>
+    `<span class="kbk-chip${_cbFilter === key ? ' act' : ''}"
+      onclick="_setCbFilter('${key}')">${label}</span>`;
+  let h = `
+    <div class="kbk-filter">
+      ${chip('all',      'All')}
+      ${chip('Checkbox', 'Checkbox')}
+      ${chip('Keybind',  'Keybind')}
+      ${chip('Dropdown', 'Dropdown')}
+      ${chip('Slider',   'Slider')}
+      ${chip('Button',   'Button')}
+    </div>
+    <input class="kbk-search" placeholder="Filter by name&hellip;"
+           value="${esc(_cbSearch)}" oninput="_setCbSearch(this.value)">
+  `;
+
+  const q = _cbSearch.trim().toLowerCase();
+  const filtered = rows.filter(e =>
+    (_cbFilter === 'all' || e.type === _cbFilter) &&
+    (!q || (e.name || '').toLowerCase().includes(q))
+  );
+
+  if (filtered.length === 0) {
+    h += `<div class="kbk-empty">
+            <em>&#x25C7;</em>
+            ${rows.length === 0
+              ? 'No interactive widgets yet.<br>Add a Checkbox, Button, Slider, Keybind, or Dropdown from the left palette.'
+              : 'No widgets match the current filter.'}
+          </div>`;
+    panel.innerHTML = h;
+    return;
+  }
+
+  for (const el of filtered) {
+    const tn    = tabName(el.tabId);
+    const type  = el.type + (el.type === 'Button' ? (el.toggleMode ? ' &middot; Toggle' : ' &middot; Click') : '');
+    const sig   = esc(cbFnSig(el));
+    const body  = esc(el.callbackBody || '');
+    const ex    = esc(cbBodyExample(el));
+    h += `
+      <div class="kbk-row" data-id="${el.id}">
+        <div class="kbk-row-head">
+          <span class="kbk-row-tab">${esc(tn)}</span>
+          <span class="kbk-row-name">${esc(el.name)}</span>
+          <span class="kbk-row-type">(${type})</span>
+          <button class="kbk-jump" onclick="_cbGoto('${el.id}')">Go to widget</button>
+        </div>
+        <div class="kbk-sig">${sig}</div>
+        <textarea class="kbk-body" spellcheck="false" placeholder="${ex}"
+          onchange="sp('${el.id}','callbackBody',this.value)">${body}</textarea>
+      </div>`;
+  }
+
+  panel.innerHTML = h;
+}
+
+function _setCbFilter(f) { _cbFilter = f; updateCallbacks(); }
+function _setCbSearch(q) { _cbSearch = q; updateCallbacks(); }
+
+// Jump: switch UI-design tab to the widget's tab, select it, switch right panel to Properties.
+function _cbGoto(id) {
+  const el = S.els.find(e => e.id === id);
+  if (!el) return;
+  if (el.tabId && el.tabId !== S.activeTab && !el.shared) {
+    S.activeTab = el.tabId;
+    if (typeof updateTabBar === 'function') updateTabBar();
+  }
+  S.sel.clear();
+  S.sel.add(el.id);
+  switchTab('p');
+  render();
+  updateLayers();
+  updateProps();
+  updateStatus();
 }
 
 function updateStatus() {
@@ -223,19 +324,109 @@ function fn(n) {
   return Number.isInteger(n) ? String(n) : Number(n).toFixed(2);
 }
 
-function vn(el) {
-  const raw = (el.name || el.type).replace(/[^a-zA-Z0-9]/g, ' ').trim();
-  return raw
-    .split(/\s+/)
-    .map(w => w[0].toUpperCase() + w.slice(1))
-    .join('')
-    .replace(/^(\d)/, '_$1');
+// Emit the unified RunService.PostLocal block that (1) dispatches event-driven
+// callbacks (Keybind CF, Dropdown, Slider, Button click) from their `E.<v>Fired`
+// flags set in PreLocal, and (2) runs the every-frame polling bodies for
+// Checkbox + toggle-Button. Keeping both in one PostLocal connect keeps PreLocal
+// lean (pure input/state) while still giving each polling widget its own
+// `wait()` throttle via a per-widget `_wt` deadline.
+function emitPostLocalInteractive(L, sorted, vn) {
+  const eventWidgets   = [];
+  const pollingWidgets = [];
+  for (const el of sorted) {
+    if (!UI_TYPES.has(el.type)) continue;
+    const act = el.action || 'CustomFunction';
+    if (el.type === 'Keybind' && (act === 'ToggleUI' || act.startsWith('switchTab:'))) continue;
+    if (el.type === 'Button'  && act.startsWith('switchTab:')) continue;
+    if (el.type === 'Checkbox' || (el.type === 'Button' && el.toggleMode)) {
+      if ((el.callbackBody || '').trim()) pollingWidgets.push(el);
+      continue;
+    }
+    // Event-driven: Keybind (CustomFunction), Dropdown, Slider, Button (click, CF)
+    eventWidgets.push(el);
+  }
+
+  if (eventWidgets.length === 0 && pollingWidgets.length === 0) return;
+
+  L.push('');
+  L.push('    do');
+  for (const el of pollingWidgets) {
+    const v = vn(el);
+    L.push(`        local _wt${v}: number = 0`);
+    L.push(`        local function _wait${v}(s: number) _wt${v} = os.clock() + s end`);
+  }
+  L.push('        RunService.PostLocal:Connect(function()');
+  L.push('            if not isrbxactive() then return end');
+
+  for (const el of eventWidgets) {
+    const v  = vn(el);
+    const cb = el.callback;
+    L.push(`            if E.${v}Fired then`);
+    if (el.type === 'Dropdown') {
+      L.push(`                local _i: number = E.${v}FiredIdx`);
+      L.push(`                E.${v}Fired = false`);
+      L.push(`                On${v}${cb}(E.${v}Selected, _i)`);
+    } else if (el.type === 'Keybind') {
+      L.push(`                E.${v}Fired = false`);
+      L.push(`                On${v}${cb}(E.${v}Key)`);
+    } else if (el.type === 'Slider') {
+      L.push(`                E.${v}Fired = false`);
+      L.push(`                On${v}${cb}(E.${v}Value)`);
+    } else if (el.type === 'Button') {
+      L.push(`                E.${v}Fired = false`);
+      L.push(`                On${v}${cb}()`);
+    }
+    L.push(`            end`);
+  }
+
+  for (const el of pollingWidgets) {
+    const v        = vn(el);
+    const stateVar = el.type === 'Checkbox' ? `${v}Checked` : `${v}Toggled`;
+    L.push('');
+    L.push(`            if E.${stateVar} and os.clock() >= _wt${v} then`);
+    L.push(`                local state: boolean = true`);
+    L.push(`                local wait = _wait${v}`);
+    for (const line of (el.callbackBody || '').trimEnd().split('\n'))
+      L.push(`                ${line}`);
+    L.push(`            end`);
+  }
+
+  L.push('        end)');
+  L.push('    end');
+}
+
+function makeVn() {
+  const used  = new Map();   // id   -> resolved var name
+  const taken = new Set();   // resolved names already claimed
+  return function vn(el) {
+    if (used.has(el.id)) return used.get(el.id);
+    let base = (el.name || el.type || '').replace(/[^a-zA-Z0-9]/g, ' ').trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map(w => w[0].toUpperCase() + w.slice(1))
+      .join('')
+      .replace(/^(\d)/, '_$1');
+    if (!base) base = el.type || 'Element';
+    let name = base, i = 2;
+    while (taken.has(name)) name = base + '_' + (i++);
+    taken.add(name);
+    used.set(el.id, name);
+    return name;
+  };
 }
 
 function genLua() {
   if ((S.drawingMode || 'static') === 'immediate') return genLuaImmediate();
+  const vn         = makeVn();
   const L          = [];
   const sorted     = sortedEls();
+  // "Center on viewport" setting: offset all position writes by _OFF at runtime
+  const centerOn   = !!(typeof SETTINGS !== 'undefined' && SETTINGS.centerOnViewport);
+  const designW    = (typeof CV !== 'undefined' && CV.width)  ? CV.width  : 1920;
+  const designH    = (typeof CV !== 'undefined' && CV.height) ? CV.height : 1080;
+  const v2p        = (x, y) => centerOn
+    ? `_OFF + Vector2.new(${Math.round(x)}, ${Math.round(y)})`
+    : v2(x, y);
   const hasDrag    = sorted.some(e => e.type === 'Square' && e.draggable);
   const hasCB      = sorted.some(e => e.type === 'Checkbox');
   const hasKB      = sorted.some(e => e.type === 'Keybind');
@@ -288,16 +479,25 @@ function genLua() {
   L.push('local Camera: Camera        = workspace.CurrentCamera');
   L.push('local ViewportSize: Vector2 = Camera.ViewportSize');
   L.push('');
-  if (hasSL)            L.push('local MathClamp = math.clamp');
-  if (hasSL)            L.push('local MathFloor = math.floor');
-  if (hasKB)            L.push('local TableFind = table.find');
-  if (hasSL || hasKB)   L.push('');
+  // Cache hot fastcall-dispatched builtins as locals at module scope.
+  // Localizing is the explicit guarantee against any global-table lookup per call.
+  L.push('local MathFloor  = math.floor');
+  if (hasSL) L.push('local MathClamp  = math.clamp');
+  if (hasSL) L.push('local MathRound  = math.round');
+  if (hasKB) L.push('local TableFind  = table.find');
+  L.push('');
 
   // ── IIFE wrapper: one function scope so locals count against it, not the chunk
   //    All Drawing objects and state go in table E — zero local registers per element
   L.push(';(function(): ()');
   L.push('');
   L.push('local E = {} -- holds all Drawing objects and widget state');
+  if (centerOn) {
+    L.push('');
+    L.push('-- Center UI on viewport: shift every position by this offset');
+    L.push(`local _VS: Vector2  = ViewportSize`);
+    L.push(`local _OFF: Vector2 = Vector2.new(math.floor((_VS.X - ${designW}) / 2), math.floor((_VS.Y - ${designH}) / 2))`);
+  }
   L.push('');
 
   // ── variables (table fields, not locals) ────────────────────
@@ -310,13 +510,17 @@ function genLua() {
         L.push(`E.${v}Label      = Drawing.new("Text")`);
         L.push(`E.${v}Checked    = ${!!el.defaultChecked}`);
         break;
-      case 'Keybind':
+      case 'Keybind': {
+        const kbAct  = el.action || 'CustomFunction';
+        const kbEvt  = kbAct === 'CustomFunction';
         L.push(`E.${v}Background  = Drawing.new("Square")`);
         L.push(`E.${v}Text        = Drawing.new("Text")`);
         L.push(`E.${v}Key         = "${el.defaultKey || 'Insert'}"`);
         L.push(`E.${v}Waiting     = false`);
         L.push(`E.${v}WaitReady   = false`);
+        if (kbEvt) L.push(`E.${v}Fired       = false`);
         break;
+      }
       case 'Dropdown': {
         const opts      = (el.options || 'Option 1').split(',').map(o => o.trim());
         const defIdx    = Math.max(0, Math.min(opts.length - 1, el.defaultIndex || 0));
@@ -328,7 +532,9 @@ function genLua() {
         L.push(`E.${v}Selected   = "${opts[defIdx]}"`);
         L.push(`E.${v}Options    = { ${opts.map(o => `"${o}"`).join(', ')} }`);
         L.push(`E.${v}Open       = false`);
-        if (isDynDD) L.push(`E.${v}SlotCount = 0`);
+        L.push(`E.${v}Fired      = false`);
+        L.push(`E.${v}FiredIdx   = 0`);
+        if (isDynDD) L.push(`E.${v}SlotCount  = 0`);
         for (let i = 0; i < slotCount; i++) {
           L.push(`E.${v}OptionBackground${i} = Drawing.new("Square")`);
           L.push(`E.${v}OptionText${i}       = Drawing.new("Text")`);
@@ -342,12 +548,17 @@ function genLua() {
         L.push(`E.${v}Label    = Drawing.new("Text")`);
         L.push(`E.${v}Value    = ${el.curVal || 0}`);
         L.push(`E.${v}Dragging = false`);
+        L.push(`E.${v}Fired    = false`);
         break;
-      case 'Button':
+      case 'Button': {
+        const btAct  = el.action || 'CustomFunction';
+        const btEvt  = btAct === 'CustomFunction' && !el.toggleMode;
         L.push(`E.${v}Background = Drawing.new("Square")`);
         L.push(`E.${v}Text       = Drawing.new("Text")`);
-        if (el.toggleMode) L.push(`E.${v}Toggled = false`);
+        if (el.toggleMode) L.push(`E.${v}Toggled  = false`);
+        if (btEvt)         L.push(`E.${v}Fired    = false`);
         break;
+      }
       default:
         L.push(`E.${v} = Drawing.new("${el.type}")`);
     }
@@ -441,21 +652,32 @@ function genLua() {
   // ── init block ───────────────────────────────────────────────
   L.push('do');
 
+  // Resolve safeZ recursively up the parent chain so grandchildren always render
+  // ABOVE their ancestors (fixes invisible widgets when a mid-hierarchy node has
+  // a lower zIndex than its descendants).
+  const _zCache = new Map();
+  const resolvedZ = (e) => {
+    if (_zCache.has(e.id)) return _zCache.get(e.id);
+    if (!e.parentId) { const z = e.zIndex || 0; _zCache.set(e.id, z); return z; }
+    const par = S.els.find(x => x.id === e.parentId);
+    if (!par) { const z = e.zIndex || 0; _zCache.set(e.id, z); return z; }
+    const pz = resolvedZ(par);
+    const z  = Math.max(e.zIndex || 0, pz + 1);
+    _zCache.set(e.id, z);
+    return z;
+  };
+
   for (const el of sorted) {
-    const v       = vn(el);
-    const b       = bounds(el);
-    const parentEl = el.parentId ? S.els.find(e => e.id === el.parentId) : null;
-    const parentZ  = parentEl ? (parentEl.zIndex || 0) : 0;
-    const safeZ    = el.parentId
-      ? Math.max(el.zIndex || 0, parentZ + 1)
-      : (el.zIndex || 0);
+    const v     = vn(el);
+    const b     = bounds(el);
+    const safeZ = resolvedZ(el);
 
     L.push('');
 
     switch (el.type) {
 
       case 'Square':
-        L.push(`    E.${v}.Position  = ${v2(b.x, b.y)}`);
+        L.push(`    E.${v}.Position  = ${v2p(b.x, b.y)}`);
         L.push(`    E.${v}.Size      = ${v2(el.w, el.h)}`);
         L.push(`    E.${v}.Color     = ${c3(el.color)}`);
         L.push(`    E.${v}.Opacity   = ${fn(el.opacity ?? 1)}`);
@@ -467,7 +689,7 @@ function genLua() {
         break;
 
       case 'Circle':
-        L.push(`    E.${v}.Position  = ${v2(b.cx, b.cy)}`);
+        L.push(`    E.${v}.Position  = ${v2p(b.cx, b.cy)}`);
         L.push(`    E.${v}.Radius    = ${el.radius}`);
         L.push(`    E.${v}.Color     = ${c3(el.color)}`);
         L.push(`    E.${v}.Opacity   = ${fn(el.opacity ?? 1)}`);
@@ -480,7 +702,7 @@ function genLua() {
 
       case 'Text': {
         const safeText = (el.text || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        L.push(`    E.${v}.Position     = ${v2(b.wx || b.x, b.wy || b.y)}`);
+        L.push(`    E.${v}.Position     = ${v2p(b.wx || b.x, b.wy || b.y)}`);
         L.push(`    E.${v}.Text         = "${safeText}"`);
         L.push(`    E.${v}.Size         = ${el.size || 16}`);
         L.push(`    E.${v}.Font         = ${el.font || 0}`);
@@ -496,9 +718,9 @@ function genLua() {
       }
 
       case 'Triangle':
-        L.push(`    E.${v}.PointA    = ${v2(b.x + b.w/2, b.y)}`);
-        L.push(`    E.${v}.PointB    = ${v2(b.x, b.y + b.h)}`);
-        L.push(`    E.${v}.PointC    = ${v2(b.x + b.w, b.y + b.h)}`);
+        L.push(`    E.${v}.PointA    = ${v2p(b.x + b.w/2, b.y)}`);
+        L.push(`    E.${v}.PointB    = ${v2p(b.x, b.y + b.h)}`);
+        L.push(`    E.${v}.PointC    = ${v2p(b.x + b.w, b.y + b.h)}`);
         L.push(`    E.${v}.Color     = ${c3(el.color)}`);
         L.push(`    E.${v}.Opacity   = ${fn(el.opacity ?? 1)}`);
         L.push(`    E.${v}.Filled    = ${!!el.filled}`);
@@ -508,8 +730,8 @@ function genLua() {
         break;
 
       case 'Line':
-        L.push(`    E.${v}.From      = ${v2(b.wx1, b.wy1)}`);
-        L.push(`    E.${v}.To        = ${v2(b.wx2, b.wy2)}`);
+        L.push(`    E.${v}.From      = ${v2p(b.wx1, b.wy1)}`);
+        L.push(`    E.${v}.To        = ${v2p(b.wx2, b.wy2)}`);
         L.push(`    E.${v}.Color     = ${c3(el.color)}`);
         L.push(`    E.${v}.Opacity   = ${fn(el.opacity ?? 1)}`);
         L.push(`    E.${v}.Thickness = ${fn(el.thickness || 1)}`);
@@ -518,7 +740,7 @@ function genLua() {
         break;
 
       case 'Polyline':
-        L.push(`    E.${v}.Points    = { ${v2(b.wx1, b.wy1)}, ${v2(b.wx2, b.wy2)} }`);
+        L.push(`    E.${v}.Points    = { ${v2p(b.wx1, b.wy1)}, ${v2p(b.wx2, b.wy2)} }`);
         L.push(`    E.${v}.Color     = ${c3(el.color)}`);
         L.push(`    E.${v}.Opacity   = ${fn(el.opacity ?? 1)}`);
         L.push(`    E.${v}.Filled    = ${!!el.filled}`);
@@ -528,7 +750,7 @@ function genLua() {
         break;
 
       case 'Image':
-        L.push(`    E.${v}.Position = ${v2(b.x, b.y)}`);
+        L.push(`    E.${v}.Position = ${v2p(b.x, b.y)}`);
         L.push(`    E.${v}.Size     = ${v2(Math.round(el.w), Math.round(el.h))}`);
         if (el.url) L.push(`    E.${v}.Url      = "${el.url}"`);
         L.push(`    E.${v}.Opacity  = ${fn(el.opacity ?? 1)}`);
@@ -538,13 +760,13 @@ function genLua() {
         break;
 
       case 'Checkbox': {
-        const z   = el.zIndex || 0;
+        const z   = safeZ;
         const pad = 3;
         const lx  = Math.round(b.x + el.w + 6);
         const ly  = Math.round(b.y + el.h/2 - (el.textSize || 16)/2);
         const lbl = (el.label || 'Checkbox').replace(/"/g, '\\"');
 
-        L.push(`    E.${v}Background.Position  = ${v2(b.x, b.y)}`);
+        L.push(`    E.${v}Background.Position  = ${v2p(b.x, b.y)}`);
         L.push(`    E.${v}Background.Size      = ${v2(el.w, el.h)}`);
         L.push(`    E.${v}Background.Color     = ${c3(el.color)}`);
         L.push(`    E.${v}Background.Filled    = true`);
@@ -553,7 +775,7 @@ function genLua() {
         L.push(`    E.${v}Background.ZIndex    = ${z}`);
         L.push(`    E.${v}Background.Visible   = ${!!el.visible}`);
         L.push('');
-        L.push(`    E.${v}Fill.Position  = ${v2(b.x + pad, b.y + pad)}`);
+        L.push(`    E.${v}Fill.Position  = ${v2p(b.x + pad, b.y + pad)}`);
         L.push(`    E.${v}Fill.Size      = ${v2(el.w - pad*2, el.h - pad*2)}`);
         L.push(`    E.${v}Fill.Color     = ${c3(el.checkedColor || '#00ff00')}`);
         L.push(`    E.${v}Fill.Filled    = true`);
@@ -561,7 +783,7 @@ function genLua() {
         L.push(`    E.${v}Fill.ZIndex    = ${z + 1}`);
         L.push(`    E.${v}Fill.Visible   = ${!!(el.defaultChecked && el.visible)}`);
         L.push('');
-        L.push(`    E.${v}Label.Position     = ${v2(lx, ly)}`);
+        L.push(`    E.${v}Label.Position     = ${v2p(lx, ly)}`);
         L.push(`    E.${v}Label.Text         = "${lbl}"`);
         L.push(`    E.${v}Label.Size         = ${el.textSize || 16}`);
         L.push(`    E.${v}Label.Font         = ${el.font || 0}`);
@@ -575,11 +797,11 @@ function genLua() {
       }
 
       case 'Keybind': {
-        const z  = el.zIndex || 0;
+        const z  = safeZ;
         const tx = Math.round(b.x + el.w/2);
         const ty = Math.round(b.y + el.h/2 - (el.textSize || 16)/2);
 
-        L.push(`    E.${v}Background.Position  = ${v2(b.x, b.y)}`);
+        L.push(`    E.${v}Background.Position  = ${v2p(b.x, b.y)}`);
         L.push(`    E.${v}Background.Size      = ${v2(el.w, el.h)}`);
         L.push(`    E.${v}Background.Color     = ${c3(el.color)}`);
         L.push(`    E.${v}Background.Filled    = ${!!el.filled}`);
@@ -588,7 +810,7 @@ function genLua() {
         L.push(`    E.${v}Background.ZIndex    = ${z}`);
         L.push(`    E.${v}Background.Visible   = ${!!el.visible}`);
         L.push('');
-        L.push(`    E.${v}Text.Position     = ${v2(tx, ty)}`);
+        L.push(`    E.${v}Text.Position     = ${v2p(tx, ty)}`);
         L.push(`    E.${v}Text.Text         = "[" .. E.${v}Key .. "]"`);
         L.push(`    E.${v}Text.Size         = ${el.textSize || 16}`);
         L.push(`    E.${v}Text.Font         = ${el.font || 0}`);
@@ -603,13 +825,13 @@ function genLua() {
       }
 
       case 'Dropdown': {
-        const z    = el.zIndex || 0;
+        const z    = safeZ;
         const opts = (el.options || 'Option 1').split(',').map(o => o.trim());
         const dtx  = Math.round(b.x + 8);
         const dty  = Math.round(b.y + el.h/2 - (el.textSize || 16)/2);
         const atx  = Math.round(b.x + el.w - 16);
 
-        L.push(`    E.${v}Background.Position  = ${v2(b.x, b.y)}`);
+        L.push(`    E.${v}Background.Position  = ${v2p(b.x, b.y)}`);
         L.push(`    E.${v}Background.Size      = ${v2(el.w, el.h)}`);
         L.push(`    E.${v}Background.Color     = ${c3(el.color)}`);
         L.push(`    E.${v}Background.Filled    = ${!!el.filled}`);
@@ -618,7 +840,7 @@ function genLua() {
         L.push(`    E.${v}Background.ZIndex    = ${z}`);
         L.push(`    E.${v}Background.Visible   = ${!!el.visible}`);
         L.push('');
-        L.push(`    E.${v}Text.Position  = ${v2(dtx, dty)}`);
+        L.push(`    E.${v}Text.Position  = ${v2p(dtx, dty)}`);
         L.push(`    E.${v}Text.Text      = E.${v}Selected`);
         L.push(`    E.${v}Text.Size      = ${el.textSize || 16}`);
         L.push(`    E.${v}Text.Font      = ${el.font || 0}`);
@@ -629,7 +851,7 @@ function genLua() {
         L.push(`    E.${v}Text.ZIndex    = ${z + 1}`);
         L.push(`    E.${v}Text.Visible   = ${!!el.visible}`);
         L.push('');
-        L.push(`    E.${v}Arrow.Position = ${v2(atx, dty)}`);
+        L.push(`    E.${v}Arrow.Position = ${v2p(atx, dty)}`);
         L.push(`    E.${v}Arrow.Text     = "\u25bc"`);
         L.push(`    E.${v}Arrow.Size     = ${Math.max(10, (el.textSize || 16) - 4)}`);
         L.push(`    E.${v}Arrow.Font     = ${el.font || 0}`);
@@ -643,7 +865,7 @@ function genLua() {
           const ory = Math.round(b.y + el.h * (i + 1));
           const oty = Math.round(b.y + el.h * (i + 1) + el.h/2 - (el.textSize || 16)/2);
           L.push('');
-          L.push(`    E.${v}OptionBackground${i}.Position  = ${v2(b.x, ory)}`);
+          L.push(`    E.${v}OptionBackground${i}.Position  = ${v2p(b.x, ory)}`);
           L.push(`    E.${v}OptionBackground${i}.Size      = ${v2(el.w, el.h)}`);
           L.push(`    E.${v}OptionBackground${i}.Color     = ${c3(el.color)}`);
           L.push(`    E.${v}OptionBackground${i}.Filled    = true`);
@@ -651,7 +873,7 @@ function genLua() {
           L.push(`    E.${v}OptionBackground${i}.ZIndex    = ${z + 2}`);
           L.push(`    E.${v}OptionBackground${i}.Visible   = false`);
           L.push('');
-          L.push(`    E.${v}OptionText${i}.Position  = ${v2(Math.round(b.x + 8), oty)}`);
+          L.push(`    E.${v}OptionText${i}.Position  = ${v2p(Math.round(b.x + 8), oty)}`);
           L.push(`    E.${v}OptionText${i}.Text      = "${isDynDD3 ? '' : opts[i] || ''}"`);
           L.push(`    E.${v}OptionText${i}.Size      = ${el.textSize || 16}`);
           L.push(`    E.${v}OptionText${i}.Font      = ${el.font || 0}`);
@@ -663,11 +885,11 @@ function genLua() {
       }
 
       case 'Slider': {
-        const z   = el.zIndex || 0;
+        const z   = safeZ;
         const pct = ((el.curVal || 0) - (el.minVal || 0)) / Math.max(1, (el.maxVal || 100) - (el.minVal || 0));
         const fw  = Math.max(0, el.w * pct);
 
-        L.push(`    E.${v}Track.Position  = ${v2(b.x, b.y)}`);
+        L.push(`    E.${v}Track.Position  = ${v2p(b.x, b.y)}`);
         L.push(`    E.${v}Track.Size      = ${v2(el.w, el.h)}`);
         L.push(`    E.${v}Track.Color     = ${c3(el.color)}`);
         L.push(`    E.${v}Track.Opacity   = ${fn((el.opacity ?? 1) * 0.3)}`);
@@ -676,7 +898,7 @@ function genLua() {
         L.push(`    E.${v}Track.ZIndex    = ${z}`);
         L.push(`    E.${v}Track.Visible   = ${!!el.visible}`);
         L.push('');
-        L.push(`    E.${v}Fill.Position   = ${v2(b.x, b.y)}`);
+        L.push(`    E.${v}Fill.Position   = ${v2p(b.x, b.y)}`);
         L.push(`    E.${v}Fill.Size       = ${v2(Math.round(fw), el.h)}`);
         L.push(`    E.${v}Fill.Color      = ${c3(el.color)}`);
         L.push(`    E.${v}Fill.Filled     = true`);
@@ -684,7 +906,7 @@ function genLua() {
         L.push(`    E.${v}Fill.ZIndex     = ${z + 1}`);
         L.push(`    E.${v}Fill.Visible    = ${!!el.visible}`);
         L.push('');
-        L.push(`    E.${v}Knob.Position   = ${v2(Math.round(b.x + fw - 5), b.y - 2)}`);
+        L.push(`    E.${v}Knob.Position   = ${v2p(Math.round(b.x + fw - 5), b.y - 2)}`);
         L.push(`    E.${v}Knob.Size       = ${v2(10, el.h + 4)}`);
         L.push(`    E.${v}Knob.Color      = ${c3(el.knobColor || '#ffffff')}`);
         L.push(`    E.${v}Knob.Filled     = true`);
@@ -692,7 +914,7 @@ function genLua() {
         L.push(`    E.${v}Knob.ZIndex     = ${z + 2}`);
         L.push(`    E.${v}Knob.Visible    = ${!!el.visible}`);
         L.push('');
-        L.push(`    E.${v}Label.Position  = ${v2(Math.round(b.x + el.w/2), b.y - 16)}`);
+        L.push(`    E.${v}Label.Position  = ${v2p(Math.round(b.x + el.w/2), b.y - 16)}`);
         L.push(`    E.${v}Label.Text      = tostring(E.${v}Value) .. "${el.suffix || ''}"`);
         L.push(`    E.${v}Label.Size      = 11`);
         L.push(`    E.${v}Label.Font      = 0`);
@@ -704,12 +926,12 @@ function genLua() {
       }
 
       case 'Button': {
-        const z   = el.zIndex || 0;
+        const z   = safeZ;
         const btx = Math.round(b.x + el.w/2);
         const bty = Math.round(b.y + el.h/2 - (el.textSize || 16)/2);
         const lbl = (el.label || 'Button').replace(/"/g, '\\"');
 
-        L.push(`    E.${v}Background.Position  = ${v2(b.x, b.y)}`);
+        L.push(`    E.${v}Background.Position  = ${v2p(b.x, b.y)}`);
         L.push(`    E.${v}Background.Size      = ${v2(el.w, el.h)}`);
         L.push(`    E.${v}Background.Color     = ${c3(el.color)}`);
         L.push(`    E.${v}Background.Filled    = ${!!el.filled}`);
@@ -718,7 +940,7 @@ function genLua() {
         L.push(`    E.${v}Background.ZIndex    = ${z}`);
         L.push(`    E.${v}Background.Visible   = ${!!el.visible}`);
         L.push('');
-        L.push(`    E.${v}Text.Position     = ${v2(btx, bty)}`);
+        L.push(`    E.${v}Text.Position     = ${v2p(btx, bty)}`);
         L.push(`    E.${v}Text.Text         = "${lbl}"`);
         L.push(`    E.${v}Text.Size         = ${el.textSize || 16}`);
         L.push(`    E.${v}Text.Font         = ${el.font || 0}`);
@@ -805,6 +1027,7 @@ function genLua() {
 
     // ── PreLocal: input + state only ─────────────────────────
     L.push('    RunService.PreLocal:Connect(function()');
+    L.push('        if not isrbxactive() then return end  -- skip input when Roblox unfocused');
     L.push('        local Mouse: Vector2       = UserInputService:GetMouseLocation()');
     L.push('        local LeftPressed: boolean = isleftpressed()');
     L.push('        local LeftClicked: boolean = LeftPressed and not PrevLeftPressed');
@@ -826,13 +1049,14 @@ function genLua() {
           L.push(`                if E.${v}Checked then`);
           for (const peer of peers) {
             const pv = vn(peer);
+            // Peer's body (if any) will run in the PostLocal poll next frame via the
+            // updated E.<peer>Checked state — no explicit dispatch needed here.
             L.push(`                    E.${pv}Checked = false`);
-            L.push(`                    On${pv}${peer.callback}(false)`);
           }
           L.push(`                end`);
         }
       }
-      L.push(`                On${v}${el.callback}(E.${v}Checked)`);
+      // Body (if set) runs in PostLocal every frame while E.<v>Checked — no dispatch needed.
       L.push(`            end`);
       L.push(`        end`);
       L.push('');
@@ -892,7 +1116,8 @@ function genLua() {
       L.push(`                    E.${v}Key       = Pressed[1]`);
       L.push(`                    E.${v}Waiting   = false`);
       L.push(`                    E.${v}WaitReady = false`);
-      if (!isTogUI && !isKbSwTab) L.push(`                    On${v}${el.callback}(E.${v}Key)`);
+      // Key-capture fires CustomFunction once: flag, dispatch runs in PostLocal.
+      if (!isTogUI && !isKbSwTab) L.push(`                    E.${v}Fired     = true`);
       L.push(`                end`);
       L.push(`            elseif not LeftPressed then`);
       L.push(`                E.${v}WaitReady = true`);
@@ -909,13 +1134,16 @@ function genLua() {
       L.push(`            end`);
       L.push(`            if ${tg}TableFind(Keys, E.${v}Key) and not TableFind(PrevKeys, E.${v}Key) then`);
       if (isTogUI) {
+        // ToggleUI runs inline in PreLocal — it must affect render-visibility this frame.
         L.push(`                UIVisible = not UIVisible`);
         emitStaticVis(16);
         if (needsSetTab) L.push(`                if UIVisible then SetTab(ActiveTab) end`);
       } else if (isKbSwTab) {
+        // switchTab runs inline in PreLocal — must affect ActiveTab before render reads it.
         L.push(`                SetTab(${kbSwTabIdx || 1})`);
       } else {
-        L.push(`                On${v}${el.callback}(E.${v}Key)`);
+        // CustomFunction — flag for PostLocal dispatch.
+        L.push(`                E.${v}Fired = true`);
       }
       L.push(`            end`);
       L.push(`        end`);
@@ -952,7 +1180,8 @@ function genLua() {
         L.push(`                    and Mouse.Y >= SlotY and Mouse.Y < SlotY + BgSize.Y then`);
         L.push(`                        E.${v}Selected = E.${v}Options[_i]`);
         L.push(`                        E.${v}Open     = false`);
-        L.push(`                        On${v}${el.callback}(E.${v}Options[_i], _i)`);
+        L.push(`                        E.${v}FiredIdx = _i`);
+        L.push(`                        E.${v}Fired    = true`);
         L.push(`                        break`);
         L.push(`                    end`);
         L.push(`                end`);
@@ -976,7 +1205,8 @@ function genLua() {
           L.push(`                and Mouse.Y >= Pos.Y and Mouse.Y <= Pos.Y + Size.Y then`);
           L.push(`                    E.${v}Selected = "${opts[i]}"`);
           L.push(`                    E.${v}Open     = false`);
-          L.push(`                    On${v}${el.callback}("${opts[i]}", ${i + 1})`);
+          L.push(`                    E.${v}FiredIdx = ${i + 1}`);
+          L.push(`                    E.${v}Fired    = true`);
           L.push(`                end`);
           L.push(`            end`);
         }
@@ -1004,12 +1234,12 @@ function genLua() {
         L.push(`                E.${v}Value         = MathFloor(${el.minVal || 0} + T * (${el.maxVal || 100} - ${el.minVal || 0}))`);
       }
       if (!el.fireOnRelease) {
-        L.push(`                On${v}${el.callback}(E.${v}Value)`);
+        L.push(`                E.${v}Fired         = true`);
       }
       L.push(`            elseif not LeftPressed then`);
       if (el.fireOnRelease) {
         L.push(`                if E.${v}Dragging then`);
-        L.push(`                    On${v}${el.callback}(E.${v}Value)`);
+        L.push(`                    E.${v}Fired    = true`);
         L.push(`                end`);
       }
       L.push(`                E.${v}Dragging = false`);
@@ -1037,9 +1267,8 @@ function genLua() {
         L.push(`                SetTab(${switchTabIdx || 1})`);
       } else if (el.toggleMode) {
         L.push(`                E.${v}Toggled = not E.${v}Toggled`);
-        L.push(`                On${v}${el.callback}(E.${v}Toggled)`);
       } else {
-        L.push(`                On${v}${el.callback}()`);
+        L.push(`                E.${v}Fired   = true`);
       }
       L.push(`            end`);
       L.push(`        end`);
@@ -1049,7 +1278,23 @@ function genLua() {
     for (const el of draggables) {
       const v      = vn(el);
       const b      = bounds(el);
-      const uiKids = S.els.filter(e => e.parentId === el.id && e.visible && UI_TYPES.has(e.type));
+      // Cross-tab parent guard: only include children on the same tab (or shared-across-tabs).
+      const _sameTab = (k) => el.shared || k.shared || ((k.tabId || S.tabs[0].id) === (el.tabId || S.tabs[0].id));
+      // Recursive descendant walk so hit-test exclusion covers grandchildren too.
+      const uiKids = [];
+      {
+        const stack = S.els.filter(e => e.parentId === el.id && e.visible && _sameTab(e));
+        const seen  = new Set();
+        while (stack.length) {
+          const k = stack.shift();
+          if (seen.has(k.id)) continue;
+          seen.add(k.id);
+          if (UI_TYPES.has(k.type)) uiKids.push(k);
+          for (const gc of S.els) {
+            if (gc.parentId === k.id && gc.visible && _sameTab(gc) && !seen.has(gc.id)) stack.push(gc);
+          }
+        }
+      }
       const kidHitVar = kid => kid.type === 'Slider' ? `${vn(kid)}Track` : `${vn(kid)}Background`;
 
       L.push(`        do`);
@@ -1101,24 +1346,12 @@ function genLua() {
     }
     L.push('    end)');
 
-    // ── PostLocal: every-frame bodies with wait() throttle ───
-    for (const el of sorted.filter(e =>
-      (e.type === 'Checkbox' || (e.type === 'Button' && e.toggleMode)) &&
-      (e.callbackBody || '').trim()
-    )) {
-      const v        = vn(el);
-      const stateVar = el.type === 'Checkbox' ? `${v}Checked` : `${v}Toggled`;
-      L.push('');
-      L.push('    do');
-      L.push('        local _wt: number = 0');
-      L.push('        local function wait(s: number) _wt = os.clock() + s end');
-      L.push('        RunService.PostLocal:Connect(function()');
-      L.push('            if os.clock() < _wt then return end');
-      L.push(`            local state: boolean = E.${stateVar}`);
-      for (const line of el.callbackBody.trimEnd().split('\n')) L.push(`            ${line}`);
-      L.push('        end)');
-      L.push('    end');
-    }
+    // ── PostLocal: unified event dispatch + every-frame polling bodies ───
+    // Severe phase map: Render = draw only, PreLocal = logic/state mutation,
+    // PostLocal = "per-frame logic after physics / input globals / free user code."
+    // All user callback bodies (event + polling) run here so PreLocal stays
+    // focused on input handling and never interleaves with user code.
+    emitPostLocalInteractive(L, sorted, vn);
     } // end needsInteractive
     L.push('');
 
@@ -1130,9 +1363,13 @@ function genLua() {
       L.push('');
     }
 
-    // ── Render: drawing updates only (only when there are interactive elements) ──
+    // ── PreLocal #2: Drawing property updates (retained-mode, so no Render needed) ──
+    // Severe rule: Render is for DRAWING ONLY. Retained-mode Drawing objects (Drawing.new)
+    // keep rendering themselves once their properties are set — so every mutation here
+    // (Visible, Color, Position, Size, Text) belongs in PreLocal, not Render.
     if (needsInteractive) {
-    L.push('    RunService.Render:Connect(function()');
+    L.push('    RunService.PreLocal:Connect(function()');
+    L.push('        if not isrbxactive() then return end  -- skip per-frame work when unfocused');
     if (needsMouse) {
       L.push('        local Mouse: Vector2 = UserInputService:GetMouseLocation()');
       L.push('');
@@ -1241,7 +1478,23 @@ function genLua() {
     for (const el of draggables) {
       const v       = vn(el);
       const b       = bounds(el);
-      const allKids = S.els.filter(e => e.parentId === el.id && e.visible);
+      // Cross-tab parent guard: only move children on the same tab (or shared).
+      const _sameTab = (k) => el.shared || k.shared || ((k.tabId || S.tabs[0].id) === (el.tabId || S.tabs[0].id));
+      // Recursive descendant walk: move ALL descendants of the draggable, not just direct children.
+      const allKids = [];
+      {
+        const stack = S.els.filter(e => e.parentId === el.id && e.visible && _sameTab(e));
+        const seen  = new Set();
+        while (stack.length) {
+          const k = stack.shift();
+          if (seen.has(k.id)) continue;
+          seen.add(k.id);
+          allKids.push(k);
+          for (const gc of S.els) {
+            if (gc.parentId === k.id && gc.visible && _sameTab(gc) && !seen.has(gc.id)) stack.push(gc);
+          }
+        }
+      }
 
       L.push(`        if E.${v}DragActive then`);
       L.push(`            local NewPos: Vector2 = E.${v}DragStartPos + (Mouse - E.${v}DragStartMouse)`);
@@ -1288,6 +1541,13 @@ function genLua() {
           L.push(`            E.${kv}.PointA = NewPos + Vector2.new(${ox + Math.round(kid.w / 2)}, ${oy})`);
           L.push(`            E.${kv}.PointB = NewPos + Vector2.new(${ox}, ${oy + kid.h})`);
           L.push(`            E.${kv}.PointC = NewPos + Vector2.new(${ox + kid.w}, ${oy + kid.h})`);
+        } else if (kid.type === 'Text') {
+          // Centered text uses its anchor (kb.wx/wy), not the bbox left edge, as .Position.
+          // Using ox/oy (which derive from kb.x = wx - tw/2) would drift centered labels
+          // by half their width on every drag. Use the raw anchor offset instead.
+          const ax = Math.round(kb.wx != null ? kb.wx : kb.x) - Math.round(b.x);
+          const ay = Math.round(kb.wy != null ? kb.wy : kb.y) - Math.round(b.y);
+          L.push(`            E.${kv}.Position = NewPos + Vector2.new(${ax}, ${ay})`);
         } else if (kid.type === 'Line') {
           const kb2 = bounds(kid);
           const dx2 = Math.round(kb2.wx2) - Math.round(kb2.wx1);
@@ -1325,8 +1585,13 @@ function genLua() {
    IMMEDIATE MODE CODE GENERATION
 ═══════════════════════════════════════════ */
 function genLuaImmediate() {
+  const vn     = makeVn();
   const L      = [];
   const sorted = sortedEls();
+  // "Center on viewport" setting: shift every cached position by _OFF
+  const centerOn = !!(typeof SETTINGS !== 'undefined' && SETTINGS.centerOnViewport);
+  const designW  = (typeof CV !== 'undefined' && CV.width)  ? CV.width  : 1920;
+  const designH  = (typeof CV !== 'undefined' && CV.height) ? CV.height : 1080;
 
   // ── flags (mirrors genLua) ───────────────────────────────────
   const hasDrag    = sorted.some(e => e.type === 'Square' && e.draggable);
@@ -1355,12 +1620,32 @@ function genLuaImmediate() {
   }
 
   // ── helpers ───────────────────────────────────────────────────
-  const isDragChild = el => {
-    if (!el.parentId) return false;
-    const par = S.els.find(e => e.id === el.parentId);
-    return !!(par && par.type === 'Square' && par.draggable);
+  // Walk up the ancestor chain to find a draggable Square. The cross-tab guard is
+  // applied ONLY at the draggable endpoint (mirroring the static-mode _sameTab
+  // filter used by the drag handler): the descendant follows the drag if the
+  // draggable is shared, OR the descendant itself is shared, OR they share a tab.
+  // Intermediate containers may live on a different tab (e.g. Tab-2 ESP group
+  // parented through a Tab-1 CombatBg whose own parent is a shared draggable) —
+  // that's legal because the static drag walks DOWN from the draggable and would
+  // still include the descendant.
+  const findDragAncestor = el => {
+    let cur = el;
+    const seen = new Set();
+    const T0 = S.tabs[0].id;
+    while (cur && cur.parentId && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      const par = S.els.find(e => e.id === cur.parentId);
+      if (!par) return undefined;
+      if (par.type === 'Square' && par.draggable) {
+        if (par.shared || el.shared || (par.tabId || T0) === (el.tabId || T0)) return par;
+        return undefined;
+      }
+      cur = par;
+    }
+    return undefined;
   };
-  const dragParent = el => S.els.find(e => e.id === el.parentId);
+  const isDragChild = el => !!findDragAncestor(el);
+  const dragParent  = el => findDragAncestor(el);
 
   // ── pre-cache: Color3 + Vector2 constants (module-level locals) ──
   // These are emitted BEFORE the IIFE so Render never allocates static values.
@@ -1400,9 +1685,25 @@ function genLuaImmediate() {
     if (!cachedV2Pos.has(key)) {
       const nm = uniqHint('_P' + hint);
       cachedV2Pos.set(key, nm);
-      cacheLines.push(`local ${nm}: Vector2 = Vector2.new(${Math.round(x)}, ${Math.round(y)})`);
+      const rhs = centerOn
+        ? `_OFF + Vector2.new(${Math.round(x)}, ${Math.round(y)})`
+        : `Vector2.new(${Math.round(x)}, ${Math.round(y)})`;
+      cacheLines.push(`local ${nm}: Vector2 = ${rhs}`);
     }
     return cachedV2Pos.get(key);
+  };
+
+  // Helper: if a filled-rect-style widget has rounding > 0, pre-register the two
+  // central-bar sizes used by emitFilledRect so the cache lines are emitted before
+  // the IIFE (getV appends to `cacheLines`, which has already been flushed once the
+  // render loop runs — so anything we'll ask for during render must be registered now).
+  const preRoundV = (w, h, rounding, hint) => {
+    if (!rounding || rounding <= 0) return;
+    const W = Math.round(w), H = Math.round(h);
+    const r = Math.max(0, Math.min(Math.round(rounding), Math.floor(W / 2), Math.floor(H / 2)));
+    if (r <= 0) return;
+    getV(W - 2 * r, H,         hint + 'H');
+    getV(W,         H - 2 * r, hint + 'V');
   };
 
   // Walk elements once to register all constants
@@ -1415,6 +1716,7 @@ function genLuaImmediate() {
       case 'Square':
         getC(el.color, v);
         getV(el.w, el.h, v);
+        if (el.filled) preRoundV(el.w, el.h, el.rounding || 0, v);
         if (!idc && !el.draggable) getP(b.x, b.y, v);
         break;
       case 'Circle':
@@ -1460,6 +1762,7 @@ function genLuaImmediate() {
         getC(el.color,              v + 'Bg');
         getC(el.textColor || '#ffffff', v + 'Tx');
         getV(el.w, el.h,            v + 'Bg');
+        preRoundV(el.w, el.h, el.rounding || 0, v + 'Kb');
         if (!idc) {
           getP(b.x, b.y, v + 'Bg');
           getP(b.x + Math.round(el.w / 2), b.y + Math.round(el.h / 2 - (el.textSize || 16) / 2), v + 'Tx');
@@ -1470,6 +1773,7 @@ function genLuaImmediate() {
         getC(el.color,              v + 'Bg');
         getC(el.textColor || '#ffffff', v + 'Tx');
         getV(el.w, el.h,            v + 'Bg');
+        preRoundV(el.w, el.h, el.rounding || 0, v + 'Dd');
         if (!idc) {
           getP(b.x, b.y, v + 'Bg');
           getP(b.x + 8,          b.y + Math.round(el.h / 2 - (el.textSize || 16) / 2), v + 'Tx');
@@ -1483,6 +1787,7 @@ function genLuaImmediate() {
         getC(el.textColor || '#ffffff', v + 'Lb');
         getV(el.w, el.h,            v + 'Tk');
         getV(10, el.h + 4,          v + 'Kn');
+        preRoundV(el.w, el.h, el.rounding || 0, v + 'Sl');
         if (!idc) {
           getP(b.x, b.y, v + 'Tk');
           getP(b.x + Math.round(el.w / 2), b.y - 16, v + 'Lb');
@@ -1496,6 +1801,7 @@ function genLuaImmediate() {
         if (el.toggleMode) getC(el.activeColor || '#2a5ec4', v + 'Ac');
         if (el.tabActiveColor) getC(el.tabActiveColor, v + 'TbAc');
         getV(el.w, el.h,            v + 'Bg');
+        preRoundV(el.w, el.h, el.rounding || 0, v + 'Bt');
         if (!idc) {
           getP(b.x, b.y, v + 'Bg');
           getP(b.x + Math.round(el.w / 2), b.y + Math.round(el.h / 2 - (el.textSize || 16) / 2), v + 'Tx');
@@ -1515,10 +1821,33 @@ function genLuaImmediate() {
   L.push('local Camera: Camera        = workspace.CurrentCamera');
   L.push('local ViewportSize: Vector2 = Camera.ViewportSize');
   L.push('');
-  if (hasSL)          L.push('local MathClamp = math.clamp');
-  if (hasSL)          L.push('local MathFloor = math.floor');
-  if (hasKB)          L.push('local TableFind = table.find');
-  if (hasSL || hasKB) L.push('');
+  // Cache hot fastcall-dispatched builtins as locals at module scope.
+  // Immediate mode redraws every frame, so these lookups are on the hottest path in the script.
+  L.push('local MathFloor     = math.floor');
+  if (hasSL) L.push('local MathClamp     = math.clamp');
+  if (hasSL) L.push('local MathRound     = math.round');
+  if (hasKB) L.push('local TableFind     = table.find');
+  L.push('local V2new         = Vector2.new');
+  L.push('local DI            = DrawingImmediate');
+  L.push('local DI_FRect      = DrawingImmediate.FilledRectangle');
+  L.push('local DI_Rect       = DrawingImmediate.Rectangle');
+  L.push('local DI_FCircle    = DrawingImmediate.FilledCircle');
+  L.push('local DI_Circle     = DrawingImmediate.Circle');
+  L.push('local DI_FTriangle  = DrawingImmediate.FilledTriangle');
+  L.push('local DI_Triangle   = DrawingImmediate.Triangle');
+  L.push('local DI_Line       = DrawingImmediate.Line');
+  L.push('local DI_Polyline   = DrawingImmediate.Polyline');
+  L.push('local DI_Text       = DrawingImmediate.Text');
+  L.push('local DI_OText      = DrawingImmediate.OutlinedText');
+  L.push('local DI_Image      = DrawingImmediate.Image');
+  L.push('');
+
+  // Center UI on viewport: runtime offset applied to every cached position
+  if (centerOn) {
+    L.push('-- Center UI on viewport: shift every position by this offset');
+    L.push(`local _OFF: Vector2 = Vector2.new(math.floor((ViewportSize.X - ${designW}) / 2), math.floor((ViewportSize.Y - ${designH}) / 2))`);
+    L.push('');
+  }
 
   // Emit pre-cached constants
   for (const line of cacheLines) L.push(line);
@@ -1537,7 +1866,10 @@ function genLuaImmediate() {
     switch (el.type) {
       case 'Square':
         if (el.draggable) {
-          L.push(`E.${v}Pos  = Vector2.new(${Math.round(b.x)}, ${Math.round(b.y)})`);
+          const posRhs = centerOn
+            ? `_OFF + Vector2.new(${Math.round(b.x)}, ${Math.round(b.y)})`
+            : `Vector2.new(${Math.round(b.x)}, ${Math.round(b.y)})`;
+          L.push(`E.${v}Pos  = ${posRhs}`);
           L.push(`E.${v}Size = Vector2.new(${Math.round(el.w)}, ${Math.round(el.h)})`);
         }
         break;
@@ -1547,12 +1879,16 @@ function genLuaImmediate() {
       case 'Checkbox':
         L.push(`E.${v}Checked = ${!!el.defaultChecked}`);
         break;
-      case 'Keybind':
+      case 'Keybind': {
+        const kbAct = el.action || 'CustomFunction';
+        const kbEvt = kbAct === 'CustomFunction';
         L.push(`E.${v}Key         = "${el.defaultKey || 'Insert'}"`);
         L.push(`E.${v}Waiting     = false`);
         L.push(`E.${v}WaitReady   = false`);
         L.push(`E.${v}DisplayText = "[${el.defaultKey || 'Insert'}]"`);
+        if (kbEvt) L.push(`E.${v}Fired       = false`);
         break;
+      }
       case 'Dropdown': {
         const opts   = (el.options || 'Option 1').split(',').map(o => o.trim());
         const defIdx = Math.max(0, Math.min(opts.length - 1, el.defaultIndex || 0));
@@ -1560,16 +1896,26 @@ function genLuaImmediate() {
         L.push(`E.${v}Options  = { ${opts.map(o => `"${o.replace(/"/g, '\\"')}"`).join(', ')} }`);
         L.push(`E.${v}Open     = false`);
         if (el.dynamicOptions && el.dynamicOptions.trim()) L.push(`E.${v}SlotCount = 0`);
+        L.push(`E.${v}Fired    = false`);
+        L.push(`E.${v}FiredIdx = 0`);
         break;
       }
       case 'Slider':
         L.push(`E.${v}Value     = ${el.curVal || 0}`);
         L.push(`E.${v}Dragging  = false`);
         L.push(`E.${v}LabelText = "${el.curVal || 0}${el.suffix || ''}"`);
+        L.push(`E.${v}FillW     = 0`);  // pre-computed in PreLocal, consumed by Render
+        L.push(`E.${v}Fired     = false`);
         break;
-      case 'Button':
+      case 'Button': {
+        const btAct = el.action || 'CustomFunction';
+        const btEvt = btAct === 'CustomFunction' && !el.toggleMode;
         if (el.toggleMode) L.push(`E.${v}Toggled = false`);
+        L.push(`E.${v}Hover   = false`);   // pre-computed hover flag
+        L.push(`E.${v}BgColor = ${cachedColors.get(el.color)}`);  // pre-computed fill color
+        if (btEvt) L.push(`E.${v}Fired   = false`);
         break;
+      }
     }
   }
 
@@ -1654,6 +2000,7 @@ function genLuaImmediate() {
 
     // ── PreLocal ──────────────────────────────────────────────────
     L.push('    RunService.PreLocal:Connect(function()');
+    L.push('        if not isrbxactive() then return end  -- short-circuit when Roblox unfocused');
     L.push('        local Mouse: Vector2       = UserInputService:GetMouseLocation()');
     L.push('        local LeftPressed: boolean = isleftpressed()');
     L.push('        local LeftClicked: boolean = LeftPressed and not PrevLeftPressed');
@@ -1684,16 +2031,13 @@ function genLuaImmediate() {
       L.push(`            if Mouse.X >= _Pos.X and Mouse.X <= _Pos.X + ${el.w}`);
       L.push(`            and Mouse.Y >= _Pos.Y and Mouse.Y <= _Pos.Y + ${el.h} then`);
       if (el.exclusiveGroup) {
-        // uncheck others in same group
+        // uncheck others in same group — peer bodies run via PostLocal poll off
+        // their own E.<v>Checked state, so no dispatch needed here.
         const peers = sorted.filter(e => e.type === 'Checkbox' && e.id !== el.id && e.exclusiveGroup === el.exclusiveGroup);
         for (const p of peers) L.push(`                E.${vn(p)}Checked = false`);
-        L.push(`                if not E.${v}Checked then`);
-        L.push(`                    E.${v}Checked = true`);
-        L.push(`                    On${v}${el.callback}(true)`);
-        L.push(`                end`);
+        L.push(`                E.${v}Checked = true`);
       } else {
         L.push(`                E.${v}Checked = not E.${v}Checked`);
-        L.push(`                On${v}${el.callback}(E.${v}Checked)`);
       }
       L.push(`            end`);
       L.push(`        end`);
@@ -1717,7 +2061,7 @@ function genLuaImmediate() {
       L.push(`                    E.${v}Key       = Pressed[1]`);
       L.push(`                    E.${v}Waiting   = false`);
       L.push(`                    E.${v}WaitReady = false`);
-      if (!isTogUI && !isKbSwTab) L.push(`                    On${v}${el.callback}(E.${v}Key)`);
+      if (!isTogUI && !isKbSwTab) L.push(`                    E.${v}Fired     = true`);
       L.push(`                end`);
       L.push(`            elseif not LeftPressed then`);
       L.push(`                E.${v}WaitReady = true`);
@@ -1737,7 +2081,7 @@ function genLuaImmediate() {
       } else if (isKbSwTab) {
         L.push(`                SetTab(${kbSwTabIdx || 1})`);
       } else {
-        L.push(`                On${v}${el.callback}(E.${v}Key)`);
+        L.push(`                E.${v}Fired = true`);
       }
       L.push(`            end`);
       L.push(`        end`);
@@ -1777,7 +2121,8 @@ function genLuaImmediate() {
       L.push(`                    and Mouse.Y >= _SlotY and Mouse.Y < _SlotY + ${el.h} then`);
       L.push(`                        E.${v}Selected = E.${v}Options[_i]`);
       L.push(`                        E.${v}Open     = false`);
-      L.push(`                        On${v}${el.callback}(E.${v}Options[_i], _i)`);
+      L.push(`                        E.${v}FiredIdx = _i`);
+      L.push(`                        E.${v}Fired    = true`);
       L.push(`                        break`);
       L.push(`                    end`);
       L.push(`                end`);
@@ -1803,7 +2148,7 @@ function genLuaImmediate() {
         L.push(`            if not LeftPressed then`);
         L.push(`                if E.${v}Dragging then`);
         L.push(`                    E.${v}Dragging = false`);
-        L.push(`                    On${v}${el.callback}(E.${v}Value)`);
+        L.push(`                    E.${v}Fired    = true`);
         L.push(`                end`);
         L.push(`            elseif ${activeGuard} then`);
         L.push(`                E.${v}Dragging = true`);
@@ -1817,7 +2162,7 @@ function genLuaImmediate() {
         L.push(`                E.${v}Dragging = true`);
         L.push(`                local _T: number = MathClamp((Mouse.X - _TkPos.X) / ${el.w}, 0, 1)`);
         L.push(`                E.${v}Value    = MathFloor(${el.minVal || 0} + _T * ${(el.maxVal || 100) - (el.minVal || 0)})`);
-        L.push(`                On${v}${el.callback}(E.${v}Value)`);
+        L.push(`                E.${v}Fired    = true`);
         L.push(`            end`);
       }
       // Precompute label text
@@ -1846,9 +2191,8 @@ function genLuaImmediate() {
         L.push(`                SetTab(${switchTabIdx || 1})`);
       } else if (el.toggleMode) {
         L.push(`                E.${v}Toggled = not E.${v}Toggled`);
-        L.push(`                On${v}${el.callback}(E.${v}Toggled)`);
       } else {
-        L.push(`                On${v}${el.callback}()`);
+        L.push(`                E.${v}Fired   = true`);
       }
       L.push(`            end`);
       L.push(`        end`);
@@ -1859,7 +2203,22 @@ function genLuaImmediate() {
     for (const el of draggables) {
       const v       = vn(el);
       const b       = bounds(el);
-      const uiKids  = S.els.filter(e => e.parentId === el.id && e.visible && UI_TYPES.has(e.type));
+      // Cross-tab parent guard + recursive descendants (so hit-test excludes grandchildren too).
+      const _sameTabI = (k) => el.shared || k.shared || ((k.tabId || S.tabs[0].id) === (el.tabId || S.tabs[0].id));
+      const uiKids = [];
+      {
+        const stack = S.els.filter(e => e.parentId === el.id && e.visible && _sameTabI(e));
+        const seen  = new Set();
+        while (stack.length) {
+          const k = stack.shift();
+          if (seen.has(k.id)) continue;
+          seen.add(k.id);
+          if (UI_TYPES.has(k.type)) uiKids.push(k);
+          for (const gc of S.els) {
+            if (gc.parentId === k.id && gc.visible && _sameTabI(gc) && !seen.has(gc.id)) stack.push(gc);
+          }
+        }
+      }
       const kidHitVar = kid => kid.type === 'Slider' ? `Pos_${vn(kid)}Tk` : `Pos_${vn(kid)}Bg`;
       L.push(`        do`);
       L.push(`            local _SqPos:  Vector2 = E.${v}Pos`);
@@ -1928,57 +2287,109 @@ function genLuaImmediate() {
       }
     }
 
+    // Pre-compute per-frame render state in PreLocal so Render is pure draw calls.
+    // (Severe rule: Render must be DRAWING ONLY — no hit-tests, no state mutation.)
+    // Buttons: cache hover + final fill color. Sliders: cache fill width.
+    {
+      const btns = sorted.filter(e => e.type === 'Button');
+      const slds = sorted.filter(e => e.type === 'Slider');
+      if (btns.length || slds.length) L.push('');
+      for (const el of btns) {
+        const v  = vn(el);
+        const b  = bounds(el);
+        const cBg  = cachedColors.get(el.color);
+        const cHv  = cachedColors.get(el.hoverColor || el.color);
+        const cAc  = el.toggleMode ? cachedColors.get(el.activeColor || '#2a5ec4') : null;
+        const cTbAc = el.tabActiveColor ? cachedColors.get(el.tabActiveColor) : null;
+        const kbAct = el.action || 'CustomFunction';
+        const isSwitchTab = kbAct.startsWith('switchTab:');
+        const switchTabN  = isSwitchTab ? S.tabs.findIndex(t => t.id === kbAct.slice('switchTab:'.length)) + 1 : 0;
+        // resolve button position (same logic as Render renderPos)
+        let posExpr;
+        if (isDragChild(el)) {
+          const par = dragParent(el); const pb = bounds(par);
+          const ox  = Math.round(b.x) - Math.round(pb.x);
+          const oy  = Math.round(b.y) - Math.round(pb.y);
+          posExpr = `E.${vn(par)}Pos + Vector2.new(${ox}, ${oy})`;
+        } else if (el.draggable) {
+          posExpr = `E.${v}Pos`;
+        } else {
+          posExpr = cachedV2Pos.get(`${Math.round(b.x)},${Math.round(b.y)}`);
+        }
+        L.push(`        do`);
+        L.push(`            local _p: Vector2 = ${posExpr}`);
+        L.push(`            local _ov: boolean = Mouse.X >= _p.X and Mouse.X <= _p.X + ${el.w}`);
+        L.push(`                              and Mouse.Y >= _p.Y and Mouse.Y <= _p.Y + ${el.h}`);
+        L.push(`            E.${v}Hover = _ov`);
+        let colorExpr;
+        if (isSwitchTab && cTbAc) {
+          colorExpr = `if ActiveTab == ${switchTabN} then ${cTbAc} elseif _ov then ${cHv} else ${cBg}`;
+        } else if (el.toggleMode && cAc) {
+          colorExpr = `if E.${v}Toggled then ${cAc} elseif _ov then ${cHv} else ${cBg}`;
+        } else {
+          colorExpr = `if _ov then ${cHv} else ${cBg}`;
+        }
+        L.push(`            E.${v}BgColor = ${colorExpr}`);
+        L.push(`        end`);
+      }
+      for (const el of slds) {
+        const v    = vn(el);
+        const minV = el.minVal || 0;
+        const maxV = el.maxVal || 100;
+        L.push(`        do`);
+        L.push(`            local _T: number  = MathClamp((E.${v}Value - ${minV}) / ${maxV - minV}, 0, 1)`);
+        L.push(`            E.${v}FillW       = ${el.w} * _T`);
+        L.push(`        end`);
+      }
+    }
+
     if (hasKB) L.push('        PrevKeys        = Keys');
     L.push('        PrevLeftPressed = LeftPressed');
     L.push('    end)');
 
-    // ── PostLocal: callback bodies for Checkbox / toggle-Button ──
-    for (const el of sorted.filter(e =>
-      (e.type === 'Checkbox' || (e.type === 'Button' && e.toggleMode)) &&
-      (e.callbackBody || '').trim()
-    )) {
-      const v        = vn(el);
-      const stateVar = el.type === 'Checkbox' ? `${v}Checked` : `${v}Toggled`;
-      L.push('');
-      L.push('    do');
-      L.push('        local _wt: number = 0');
-      L.push('        local function wait(s: number) _wt = os.clock() + s end');
-      L.push('        RunService.PostLocal:Connect(function()');
-      L.push('            if os.clock() < _wt then return end');
-      L.push(`            local state: boolean = E.${stateVar}`);
-      for (const line of el.callbackBody.trimEnd().split('\n')) L.push(`            ${line}`);
-      L.push('        end)');
-      L.push('    end');
-    }
+    // ── PostLocal: unified event dispatch + every-frame polling bodies ───
+    // All user callback bodies (event-driven for Keybind/Dropdown/Slider/Button,
+    // polling for Checkbox/toggle-Button) run here. PreLocal stays pure input +
+    // state mutation — user code never interleaves with the input hot path.
+    emitPostLocalInteractive(L, sorted, vn);
 
     L.push('');
   } // end needsInput
 
   // ── Render: DrawingImmediate ONLY — pure draw, no state mutation ──
+  // Severe rule: Render must only dispatch DrawingImmediate.* calls.
+  // Hit-tests, Mouse reads, slider math, and color selection are all pre-computed in
+  // PreLocal and cached in E.<name>Hover / E.<name>BgColor / E.<name>FillW / E.<name>DisplayText.
   L.push('    @native');
   L.push('    local function _Render(): ()');
+    L.push('        if not isrbxactive() then return end  -- skip draw when unfocused');
     if (hasToggleUI) {
       L.push('        if not UIVisible then return end');
       L.push('');
     }
-    if (needsMouse) {
-      L.push('        local Mouse: Vector2 = UserInputService:GetMouseLocation()');
-      L.push('');
-    }
 
-    // Helper: resolve current position for an element in Render
+    // Helper: resolve current position for an element in Render.
+    // Text (and any widget using a center anchor) is cached by (b.wx, b.wy), not (b.x, b.y).
+    // Keep the lookup key in sync with what `getP(...)` registered during the walk pass.
     const renderPos = (el) => {
       if (isDragChild(el)) {
         const par = dragParent(el);
         const b2  = bounds(el);
         const pb  = bounds(par);
+        if (el.type === 'Text') {
+          const ax = Math.round(b2.wx != null ? b2.wx : b2.x) - Math.round(pb.x);
+          const ay = Math.round(b2.wy != null ? b2.wy : b2.y) - Math.round(pb.y);
+          return { expr: `E.${vn(par)}Pos + Vector2.new(${ax}, ${ay})`, isLocal: true };
+        }
         const ox  = Math.round(b2.x) - Math.round(pb.x);
         const oy  = Math.round(b2.y) - Math.round(pb.y);
         return { expr: `E.${vn(par)}Pos + Vector2.new(${ox}, ${oy})`, isLocal: true };
       }
       if (el.draggable) return { expr: `E.${vn(el)}Pos`, isLocal: false };
       const b2 = bounds(el);
-      const key = `${Math.round(b2.x)},${Math.round(b2.y)}`;
+      const kx = (el.type === 'Text' && b2.wx != null) ? b2.wx : b2.x;
+      const ky = (el.type === 'Text' && b2.wy != null) ? b2.wy : b2.y;
+      const key = `${Math.round(kx)},${Math.round(ky)}`;
       return { expr: cachedV2Pos.get(key), isLocal: false };
     };
 
@@ -1986,6 +2397,34 @@ function genLuaImmediate() {
       const fMap = { 0: 'nil', 1: '"Gotham"', 2: '"JetBrains Mono"', 3: '"Arial"', 4: '"SourceSans"' };
       const f = fMap[el.font] || 'nil';
       return f === 'nil' ? '' : `, ${f}`;
+    };
+
+    // Rounded filled-rectangle emulator.
+    // DrawingImmediate.FilledRectangle has no rounding param — emulate with 2 rects + 4 corner circles.
+    // Call with rounding<=0 for a plain FilledRectangle.
+    const emitFilledRect = (ind, posExpr, w, h, colorName, opacity, rounding, hintTag) => {
+      const W = Math.round(w), H = Math.round(h);
+      const oStr = fn(opacity ?? 1);
+      const sFull = getV(W, H, hintTag);
+      if (!rounding || rounding <= 0) {
+        L.push(`${ind}DI_FRect(${posExpr}, ${sFull}, ${colorName}, ${oStr})`);
+        return;
+      }
+      const r = Math.max(0, Math.min(Math.round(rounding), Math.floor(W / 2), Math.floor(H / 2)));
+      if (r <= 0) {
+        L.push(`${ind}DI_FRect(${posExpr}, ${sFull}, ${colorName}, ${oStr})`);
+        return;
+      }
+      const sHoriz = getV(W - 2 * r, H, hintTag + 'H');
+      const sVert  = getV(W, H - 2 * r, hintTag + 'V');
+      // 2 central bars
+      L.push(`${ind}DI_FRect(${posExpr} + Vector2.new(${r}, 0), ${sHoriz}, ${colorName}, ${oStr})`);
+      L.push(`${ind}DI_FRect(${posExpr} + Vector2.new(0, ${r}), ${sVert}, ${colorName}, ${oStr})`);
+      // 4 corner circles
+      L.push(`${ind}DI_FCircle(${posExpr} + Vector2.new(${r}, ${r}), ${r}, ${colorName}, ${oStr})`);
+      L.push(`${ind}DI_FCircle(${posExpr} + Vector2.new(${W - r}, ${r}), ${r}, ${colorName}, ${oStr})`);
+      L.push(`${ind}DI_FCircle(${posExpr} + Vector2.new(${r}, ${H - r}), ${r}, ${colorName}, ${oStr})`);
+      L.push(`${ind}DI_FCircle(${posExpr} + Vector2.new(${W - r}, ${H - r}), ${r}, ${colorName}, ${oStr})`);
     };
 
     // Emit draw calls in sorted order
@@ -2005,9 +2444,9 @@ function genLuaImmediate() {
           const rp    = renderPos(el);
           const pExpr = rp.isLocal ? (() => { const lv = `_p${v}`; L.push(`${ind}local ${lv}: Vector2 = ${rp.expr}`); return lv; })() : rp.expr;
           if (el.filled) {
-            L.push(`${ind}DrawingImmediate.FilledRectangle(${pExpr}, ${sName}, ${cName}, ${fn(el.opacity ?? 1)})`);
+            emitFilledRect(ind, pExpr, el.w, el.h, cName, el.opacity ?? 1, el.rounding || 0, v);
           } else {
-            L.push(`${ind}DrawingImmediate.Rectangle(${pExpr}, ${sName}, ${cName}, ${fn(el.opacity ?? 1)}, ${fn(el.thickness || 1)})`);
+            L.push(`${ind}DI_Rect(${pExpr}, ${sName}, ${cName}, ${fn(el.opacity ?? 1)}, ${fn(el.thickness || 1)})`);
           }
           break;
         }
@@ -2017,9 +2456,9 @@ function genLuaImmediate() {
             ? (() => { const par = dragParent(el); const pb = bounds(par); const lv = `_p${v}`; L.push(`${ind}local ${lv}: Vector2 = E.${vn(par)}Pos + Vector2.new(${Math.round(b.cx - pb.x)}, ${Math.round(b.cy - pb.y)})`); return lv; })()
             : cachedV2Pos.get(`${Math.round(b.cx)},${Math.round(b.cy)}`);
           if (el.filled) {
-            L.push(`${ind}DrawingImmediate.FilledCircle(${pName}, ${fn(el.radius)}, ${cName}, ${fn(el.opacity ?? 1)})`);
+            L.push(`${ind}DI_FCircle(${pName}, ${fn(el.radius)}, ${cName}, ${fn(el.opacity ?? 1)})`);
           } else {
-            L.push(`${ind}DrawingImmediate.Circle(${pName}, ${fn(el.radius)}, ${cName}, ${fn(el.opacity ?? 1)}, ${fn(el.thickness || 1)})`);
+            L.push(`${ind}DI_Circle(${pName}, ${fn(el.radius)}, ${cName}, ${fn(el.opacity ?? 1)}, ${fn(el.thickness || 1)})`);
           }
           break;
         }
@@ -2039,9 +2478,9 @@ function genLuaImmediate() {
             pC = cachedV2Pos.get(`${Math.round(b.x + b.w)},${Math.round(b.y + b.h)}`);
           }
           if (el.filled) {
-            L.push(`${ind}DrawingImmediate.FilledTriangle(${pA}, ${pB}, ${pC}, ${cName}, ${fn(el.opacity ?? 1)})`);
+            L.push(`${ind}DI_FTriangle(${pA}, ${pB}, ${pC}, ${cName}, ${fn(el.opacity ?? 1)})`);
           } else {
-            L.push(`${ind}DrawingImmediate.Triangle(${pA}, ${pB}, ${pC}, ${cName}, ${fn(el.opacity ?? 1)}, ${fn(el.thickness || 1)})`);
+            L.push(`${ind}DI_Triangle(${pA}, ${pB}, ${pC}, ${cName}, ${fn(el.opacity ?? 1)}, ${fn(el.thickness || 1)})`);
           }
           break;
         }
@@ -2058,7 +2497,7 @@ function genLuaImmediate() {
             pA = cachedV2Pos.get(`${Math.round(b.wx1)},${Math.round(b.wy1)}`);
             pB = cachedV2Pos.get(`${Math.round(b.wx2)},${Math.round(b.wy2)}`);
           }
-          L.push(`${ind}DrawingImmediate.Line(${pA}, ${pB}, ${cName}, ${fn(el.opacity ?? 1)}, 1, ${fn(el.thickness || 1)})`);
+          L.push(`${ind}DI_Line(${pA}, ${pB}, ${cName}, ${fn(el.opacity ?? 1)}, 1, ${fn(el.thickness || 1)})`);
           break;
         }
         case 'Polyline': {
@@ -2074,7 +2513,7 @@ function genLuaImmediate() {
             pA = cachedV2Pos.get(`${Math.round(b.wx1)},${Math.round(b.wy1)}`);
             pB = cachedV2Pos.get(`${Math.round(b.wx2)},${Math.round(b.wy2)}`);
           }
-          L.push(`${ind}DrawingImmediate.Polyline({ ${pA}, ${pB} }, ${cName}, ${fn(el.opacity ?? 1)}, ${fn(el.thickness || 1)})`);
+          L.push(`${ind}DI_Polyline({ ${pA}, ${pB} }, ${cName}, ${fn(el.opacity ?? 1)}, ${fn(el.thickness || 1)})`);
           break;
         }
         case 'Text': {
@@ -2096,9 +2535,9 @@ function genLuaImmediate() {
           }
           const fn2 = fontArg(el);
           if (el.outline) {
-            L.push(`${ind}DrawingImmediate.OutlinedText(${pExpr}, ${el.size || 16}, ${cName}, ${fn(el.opacity ?? 1)}, ${textExpr}, ${el.center ? 'true' : 'false'}${fn2})`);
+            L.push(`${ind}DI_OText(${pExpr}, ${el.size || 16}, ${cName}, ${fn(el.opacity ?? 1)}, ${textExpr}, ${el.center ? 'true' : 'false'}${fn2})`);
           } else {
-            L.push(`${ind}DrawingImmediate.Text(${pExpr}, ${el.size || 16}, ${cName}, ${fn(el.opacity ?? 1)}, ${textExpr}, ${el.center ? 'true' : 'false'}${fn2})`);
+            L.push(`${ind}DI_Text(${pExpr}, ${el.size || 16}, ${cName}, ${fn(el.opacity ?? 1)}, ${textExpr}, ${el.center ? 'true' : 'false'}${fn2})`);
           }
           break;
         }
@@ -2114,11 +2553,11 @@ function genLuaImmediate() {
           const lx    = Math.round(el.w + 6);
           const ly    = Math.round(el.h / 2 - (el.textSize || 16) / 2);
           const fn3   = fontArg({ font: el.font });
-          L.push(`${ind}DrawingImmediate.Rectangle(${pExpr}, ${sBg}, ${cBg}, ${fn(el.opacity ?? 1)}, ${fn(el.thickness || 1)})`);
+          L.push(`${ind}DI_Rect(${pExpr}, ${sBg}, ${cBg}, ${fn(el.opacity ?? 1)}, ${fn(el.thickness || 1)})`);
           L.push(`${ind}if E.${v}Checked then`);
-          L.push(`${ind}    DrawingImmediate.FilledRectangle(${pExpr} + Vector2.new(${pad}, ${pad}), ${sFl}, ${cFl}, 1)`);
+          L.push(`${ind}    DI_FRect(${pExpr} + Vector2.new(${pad}, ${pad}), ${sFl}, ${cFl}, 1)`);
           L.push(`${ind}end`);
-          L.push(`${ind}DrawingImmediate.OutlinedText(${pExpr} + Vector2.new(${lx}, ${ly}), ${el.textSize || 16}, ${cLb}, ${fn(el.opacity ?? 1)}, "${(el.label || 'Checkbox').replace(/"/g, '\\"')}", false${fn3})`);
+          L.push(`${ind}DI_OText(${pExpr} + Vector2.new(${lx}, ${ly}), ${el.textSize || 16}, ${cLb}, ${fn(el.opacity ?? 1)}, "${(el.label || 'Checkbox').replace(/"/g, '\\"')}", false${fn3})`);
           break;
         }
         case 'Keybind': {
@@ -2130,8 +2569,8 @@ function genLuaImmediate() {
           const tx    = Math.round(el.w / 2);
           const ty    = Math.round(el.h / 2 - (el.textSize || 16) / 2);
           const fn3   = fontArg({ font: el.font });
-          L.push(`${ind}DrawingImmediate.FilledRectangle(${pExpr}, ${sBg}, ${cBg}, ${fn(el.opacity ?? 1)})`);
-          L.push(`${ind}DrawingImmediate.OutlinedText(${pExpr} + Vector2.new(${tx}, ${ty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, E.${v}DisplayText, true${fn3})`);
+          emitFilledRect(ind, pExpr, el.w, el.h, cBg, el.opacity ?? 1, el.rounding || 0, v + 'Kb');
+          L.push(`${ind}DI_OText(${pExpr} + Vector2.new(${tx}, ${ty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, E.${v}DisplayText, true${fn3})`);
           break;
         }
         case 'Dropdown': {
@@ -2147,15 +2586,15 @@ function genLuaImmediate() {
           const fn3     = fontArg({ font: el.font });
           const lv      = `_dd${v}`;
           L.push(`${ind}local ${lv}: Vector2 = ${pExpr}`);
-          L.push(`${ind}DrawingImmediate.FilledRectangle(${lv}, ${sBg}, ${cBg}, ${fn(el.opacity ?? 1)})`);
-          L.push(`${ind}DrawingImmediate.OutlinedText(${lv} + Vector2.new(${dtx}, ${dty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, E.${v}Selected, false${fn3})`);
-          L.push(`${ind}DrawingImmediate.OutlinedText(${lv} + Vector2.new(${atx}, ${dty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, "v", false${fn3})`);
+          emitFilledRect(ind, lv, el.w, el.h, cBg, el.opacity ?? 1, el.rounding || 0, v + 'Dd');
+          L.push(`${ind}DI_OText(${lv} + Vector2.new(${dtx}, ${dty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, E.${v}Selected, false${fn3})`);
+          L.push(`${ind}DI_OText(${lv} + Vector2.new(${atx}, ${dty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, "v", false${fn3})`);
           L.push(`${ind}if E.${v}Open then`);
           const loopMax = isDynDD ? `E.${v}SlotCount` : `#E.${v}Options`;
           L.push(`${ind}    for _i = 1, ${loopMax} do`);
           L.push(`${ind}        local _oy: number = ${lv}.Y + ${el.h} * _i`);
-          L.push(`${ind}        DrawingImmediate.FilledRectangle(Vector2.new(${lv}.X, _oy), ${sBg}, ${cBg}, ${fn(el.opacity ?? 1)})`);
-          L.push(`${ind}        DrawingImmediate.OutlinedText(Vector2.new(${lv}.X + ${dtx}, _oy + ${dty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, E.${v}Options[_i], false${fn3})`);
+          L.push(`${ind}        DI_FRect(Vector2.new(${lv}.X, _oy), ${sBg}, ${cBg}, ${fn(el.opacity ?? 1)})`);
+          L.push(`${ind}        DI_OText(Vector2.new(${lv}.X + ${dtx}, _oy + ${dty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, E.${v}Options[_i], false${fn3})`);
           L.push(`${ind}    end`);
           L.push(`${ind}end`);
           break;
@@ -2166,51 +2605,31 @@ function genLuaImmediate() {
           const cTk   = cachedColors.get(el.color);
           const cKn   = cachedColors.get(el.knobColor || '#ffffff');
           const cLb   = cachedColors.get(el.textColor || '#ffffff');
-          const sTk   = cachedV2Sizes.get(`${Math.round(el.w)},${Math.round(el.h)}`);
           const sKn   = cachedV2Sizes.get(`10,${Math.round(el.h + 4)}`);
           const fn3   = fontArg({ font: el.font });
           const lbx   = Math.round(el.w / 2);
           const lv    = `_sl${v}`;
+          // _FW is pre-computed in PreLocal as E.${v}FillW — Render just reads it.
           L.push(`${ind}local ${lv}: Vector2 = ${pExpr}`);
-          L.push(`${ind}local _T${v}: number = MathClamp((E.${v}Value - ${el.minVal || 0}) / ${(el.maxVal || 100) - (el.minVal || 0)}, 0, 1)`);
-          L.push(`${ind}local _FW${v}: number = ${el.w} * _T${v}`);
-          L.push(`${ind}DrawingImmediate.FilledRectangle(${lv}, ${sTk}, ${cTk}, ${fn(el.opacity ?? 1)})`);
-          L.push(`${ind}DrawingImmediate.FilledRectangle(${lv}, Vector2.new(_FW${v}, ${el.h}), ${cKn}, ${fn(el.opacity ?? 1)})`);
-          L.push(`${ind}DrawingImmediate.FilledRectangle(Vector2.new(${lv}.X + _FW${v} - 5, ${lv}.Y - 2), ${sKn}, ${cKn}, ${fn(el.opacity ?? 1)})`);
-          L.push(`${ind}DrawingImmediate.OutlinedText(${lv} + Vector2.new(${lbx}, -16), 14, ${cLb}, ${fn(el.opacity ?? 1)}, E.${v}LabelText, true${fn3})`);
+          L.push(`${ind}local _FW: number    = E.${v}FillW`);
+          emitFilledRect(ind, lv, el.w, el.h, cTk, el.opacity ?? 1, el.rounding || 0, v + 'Sl');
+          L.push(`${ind}DI_FRect(${lv}, Vector2.new(_FW, ${el.h}), ${cKn}, ${fn(el.opacity ?? 1)})`);
+          L.push(`${ind}DI_FRect(Vector2.new(${lv}.X + _FW - 5, ${lv}.Y - 2), ${sKn}, ${cKn}, ${fn(el.opacity ?? 1)})`);
+          L.push(`${ind}DI_OText(${lv} + Vector2.new(${lbx}, -16), 14, ${cLb}, ${fn(el.opacity ?? 1)}, E.${v}LabelText, true${fn3})`);
           break;
         }
         case 'Button': {
           const rp    = renderPos(el);
           const pExpr = rp.isLocal ? (() => { const lv2 = `_p${v}`; L.push(`${ind}local ${lv2}: Vector2 = ${rp.expr}`); return lv2; })() : rp.expr;
-          const cBg   = cachedColors.get(el.color);
-          const cHv   = cachedColors.get(el.hoverColor || el.color);
           const cTx   = cachedColors.get(el.textColor || '#ffffff');
-          const cAc   = el.toggleMode ? cachedColors.get(el.activeColor || '#2a5ec4') : null;
-          const cTbAc = el.tabActiveColor ? cachedColors.get(el.tabActiveColor) : null;
-          const sBg   = cachedV2Sizes.get(`${Math.round(el.w)},${Math.round(el.h)}`);
-          const kbAct = el.action || 'CustomFunction';
-          const isSwitchTab = kbAct.startsWith('switchTab:');
-          const switchTabN  = isSwitchTab ? S.tabs.findIndex(t => t.id === kbAct.slice('switchTab:'.length)) + 1 : 0;
           const tx    = Math.round(el.w / 2);
           const ty    = Math.round(el.h / 2 - (el.textSize || 16) / 2);
           const fn3   = fontArg({ font: el.font });
           const lv    = `_bt${v}`;
+          // BgColor is pre-computed in PreLocal as E.${v}BgColor — Render is pure draw.
           L.push(`${ind}local ${lv}: Vector2 = ${pExpr}`);
-          L.push(`${ind}local _ov${v}: boolean = Mouse.X >= ${lv}.X and Mouse.X <= ${lv}.X + ${el.w}`);
-          L.push(`${ind}                     and Mouse.Y >= ${lv}.Y and Mouse.Y <= ${lv}.Y + ${el.h}`);
-          // color expression
-          let colorExpr;
-          if (isSwitchTab && cTbAc) {
-            colorExpr = `if ActiveTab == ${switchTabN} then ${cTbAc} elseif _ov${v} then ${cHv} else ${cBg}`;
-          } else if (el.toggleMode && cAc) {
-            colorExpr = `if E.${v}Toggled then ${cAc} elseif _ov${v} then ${cHv} else ${cBg}`;
-          } else {
-            colorExpr = `if _ov${v} then ${cHv} else ${cBg}`;
-          }
-          L.push(`${ind}local _bc${v}: Color3 = ${colorExpr}`);
-          L.push(`${ind}DrawingImmediate.FilledRectangle(${lv}, ${sBg}, _bc${v}, ${fn(el.opacity ?? 1)})`);
-          L.push(`${ind}DrawingImmediate.OutlinedText(${lv} + Vector2.new(${tx}, ${ty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, "${(el.label || 'Button').replace(/"/g, '\\"')}", true${fn3})`);
+          emitFilledRect(ind, lv, el.w, el.h, `E.${v}BgColor`, el.opacity ?? 1, el.rounding || 0, v + 'Bt');
+          L.push(`${ind}DI_OText(${lv} + Vector2.new(${tx}, ${ty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, "${(el.label || 'Button').replace(/"/g, '\\"')}", true${fn3})`);
           break;
         }
       }
@@ -2281,8 +2700,11 @@ function applySettings() {
 
   document.body.classList.toggle('compact', SETTINGS.compact);
 
-  document.getElementById('left').style.width  = SETTINGS.leftWidth  + 'px';
-  document.getElementById('right').style.width = SETTINGS.rightWidth + 'px';
+  // Drive the panel widths through CSS vars so the splitter drag can also update them
+  R.setProperty('--lw', SETTINGS.leftWidth  + 'px');
+  R.setProperty('--rw', SETTINGS.rightWidth + 'px');
+  document.getElementById('left').style.width  = '';
+  document.getElementById('right').style.width = '';
 }
 
 function syncSettUI() {
@@ -2292,12 +2714,13 @@ function syncSettUI() {
   const chkOf = (sel, val) => { const s = p.querySelector(sel); if (s) s.checked = val; };
   selOf('[onchange*="fontSize"]',   SETTINGS.fontSize);
   selOf('[onchange*="font"]',       SETTINGS.font);
-  chkOf('[onchange*="compact"]',    SETTINGS.compact);
-  chkOf('[onchange*="showGrid"]',   SETTINGS.showGrid);
-  selOf('[onchange*="gridSize"]',   SETTINGS.gridSize);
-  selOf('[onchange*="snapDist"]',   SETTINGS.snapDist);
-  selOf('[onchange*="leftWidth"]',  SETTINGS.leftWidth);
-  selOf('[onchange*="rightWidth"]', SETTINGS.rightWidth);
+  chkOf('[onchange*="compact"]',           SETTINGS.compact);
+  chkOf('[onchange*="showGrid"]',          SETTINGS.showGrid);
+  selOf('[onchange*="gridSize"]',          SETTINGS.gridSize);
+  selOf('[onchange*="snapDist"]',          SETTINGS.snapDist);
+  selOf('[onchange*="leftWidth"]',         SETTINGS.leftWidth);
+  selOf('[onchange*="rightWidth"]',        SETTINGS.rightWidth);
+  chkOf('[onchange*="centerOnViewport"]',  SETTINGS.centerOnViewport);
 
   const acc = document.getElementById('saccents');
   if (!acc) return;
@@ -2315,9 +2738,12 @@ function syncSettUI() {
 
 function setSett(key, val) {
   SETTINGS[key] = val;
+  // centerOnViewport changes the emitted Lua
+  if (key === 'centerOnViewport') _codeDirty = true;
   saveSettings();
   applySettings();
   syncSettUI();
+  if (typeof zFit === 'function') zFit();
   render();
 }
 
@@ -2326,7 +2752,9 @@ function resetSett() {
     fontSize:12, font:'JetBrains Mono', compact:false,
     showGrid:true, gridSize:24, snapDist:7,
     leftWidth:192, rightWidth:250, accent:'blue',
+    centerOnViewport:false,
   });
+  _codeDirty = true;
   saveSettings();
   applySettings();
   syncSettUI();
@@ -2368,6 +2796,7 @@ function copyCode() {
 ═══════════════════════════════════════════ */
 window.addEventListener('load', () => {
   loadSettings();
+  initSplitters();
   zFit();
   updateLayers();
   updateProps();
@@ -2375,6 +2804,58 @@ window.addEventListener('load', () => {
 });
 
 window.addEventListener('resize', zFit);
+
+/* ═══════════════════════════════════════════
+   SIDE-PANEL SPLITTERS
+   Drag left/right splitter bars to resize the panels.
+═══════════════════════════════════════════ */
+function initSplitters() {
+  // Apply persisted widths to CSS vars
+  const rootStyle = document.documentElement.style;
+  const lw = (SETTINGS && SETTINGS.leftWidth)  ? SETTINGS.leftWidth  : 192;
+  const rw = (SETTINGS && SETTINGS.rightWidth) ? SETTINGS.rightWidth : 250;
+  rootStyle.setProperty('--lw', lw + 'px');
+  rootStyle.setProperty('--rw', rw + 'px');
+
+  const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+
+  const bind = (el, side) => {
+    if (!el) return;
+    el.addEventListener('mousedown', ev => {
+      ev.preventDefault();
+      el.classList.add('active');
+      const startX = ev.clientX;
+      const startW = side === 'left'
+        ? (parseInt(getComputedStyle(document.documentElement).getPropertyValue('--lw')) || 192)
+        : (parseInt(getComputedStyle(document.documentElement).getPropertyValue('--rw')) || 250);
+      const onMove = e => {
+        const dx = e.clientX - startX;
+        const w  = side === 'left'
+          ? clamp(startW + dx, 160, 500)
+          : clamp(startW - dx, 160, 500);
+        rootStyle.setProperty(side === 'left' ? '--lw' : '--rw', w + 'px');
+        if (typeof zFit === 'function') zFit();
+      };
+      const onUp = () => {
+        el.classList.remove('active');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup',   onUp);
+        // Persist
+        const finalW = parseInt(getComputedStyle(document.documentElement)
+          .getPropertyValue(side === 'left' ? '--lw' : '--rw')) || (side === 'left' ? 192 : 250);
+        if (typeof SETTINGS !== 'undefined') {
+          SETTINGS[side === 'left' ? 'leftWidth' : 'rightWidth'] = finalW;
+          if (typeof saveSettings === 'function') saveSettings();
+        }
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup',   onUp);
+    });
+  };
+
+  bind(document.getElementById('splitL'), 'left');
+  bind(document.getElementById('splitR'), 'right');
+}
 
 document.addEventListener('mousedown', e => {
   const p = document.getElementById('sett');

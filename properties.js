@@ -19,6 +19,79 @@ function typeColor(el) {
 }
 
 /* ═══════════════════════════════════════════
+   CALLBACK HELPERS  (shared by Properties + Callbacks tab)
+═══════════════════════════════════════════ */
+// Derive the Lua variable name for an element (display-only — no dedup needed
+// here; codegen handles collision resolution via its own makeVn()).
+function cbVarName(el) {
+  const base = (el.name || el.type || '').replace(/[^a-zA-Z0-9]/g, ' ').trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(w => w[0].toUpperCase() + w.slice(1))
+    .join('')
+    .replace(/^(\d)/, '_$1');
+  return base || (el.type || 'Element');
+}
+
+function cbFnSig(el) {
+  const fn = `On${cbVarName(el)}${el.callback || ''}`;
+  switch (el.type) {
+    case 'Checkbox': return `${fn}(state: boolean)`;
+    case 'Keybind':  return `${fn}(key: string)`;
+    case 'Dropdown': return `${fn}(selected: string, index: number)`;
+    case 'Slider':   return `${fn}(value: number)`;
+    case 'Button':   return el.toggleMode ? `${fn}(state: boolean)` : `${fn}()`;
+    default:         return fn;
+  }
+}
+function cbBodyHint(el) {
+  switch (el.type) {
+    case 'Checkbox': return 'state: boolean &mdash; true = checked &bull; use wait(n) for waiting';
+    case 'Keybind':  return 'key: string &mdash; e.g. &quot;Insert&quot;, &quot;F1&quot;, &quot;A&quot;';
+    case 'Dropdown': return 'selected: string, index: number &mdash; index is 1-based';
+    case 'Slider':   return 'value: number &mdash; current slider value';
+    case 'Button':   return el.toggleMode ? 'state: boolean &mdash; true when toggled on &bull; use wait(n) for waiting' : '(no parameters)';
+    default:         return '';
+  }
+}
+function cbBodyExample(el) {
+  switch (el.type) {
+    case 'Checkbox': return 'if state then\n    warn("enabled")\nelse\n    warn("disabled")\nend';
+    case 'Keybind':  return '-- runs once when the key is pressed\nwarn("pressed: " .. key)';
+    case 'Dropdown': return 'warn("picked " .. selected .. " at #" .. index)';
+    case 'Slider':   return 'warn("value = " .. value)';
+    case 'Button':   return el.toggleMode
+      ? 'if state then\n    warn("on")\nelse\n    warn("off")\nend'
+      : 'warn("clicked")';
+    default:         return '-- write your Lua code here';
+  }
+}
+// Describes which locals and helpers are in-scope inside the callback body.
+// Rendered in the Callbacks tab below the signature.
+function cbBodyScope(el) {
+  const common = '<code>E.*</code> (widget state)';
+  switch (el.type) {
+    case 'Checkbox': return `<code>state</code>, <code>wait(n)</code>, ${common}`;
+    case 'Keybind':  return `<code>key</code>, ${common}`;
+    case 'Dropdown': return `<code>selected</code>, <code>index</code>, ${common}`;
+    case 'Slider':   return `<code>value</code>, ${common}`;
+    case 'Button':   return el.toggleMode
+      ? `<code>state</code>, <code>wait(n)</code>, ${common}`
+      : common;
+    default:         return common;
+  }
+}
+// Is this widget's callback action a user CustomFunction (vs. ToggleUI / switchTab:xxx)?
+// Only CustomFunction widgets have an editable body.
+function cbHasBody(el) {
+  if (!UI_TYPES.has(el.type)) return false;
+  const act = el.action || 'CustomFunction';
+  if (el.type === 'Keybind' && (act === 'ToggleUI' || act.startsWith('switchTab:'))) return false;
+  if (el.type === 'Button'  && act.startsWith('switchTab:')) return false;
+  return true;
+}
+
+/* ═══════════════════════════════════════════
    LAYERS PANEL
 ═══════════════════════════════════════════ */
 function updateLayers() {
@@ -34,7 +107,8 @@ function updateLayers() {
     const d = document.createElement('div');
     d.className = 'lay'
       + (S.sel.has(item.id) ? ' sel' : '')
-      + (item.visible       ? ''     : ' hid');
+      + (item.visible       ? ''     : ' hid')
+      + (item.locked        ? ' locked' : '');
 
     const indent = depth
       ? `<span class="lind" style="min-width:${depth * 12}px"></span>`
@@ -42,14 +116,51 @@ function updateLayers() {
       : `<span class="lind" style="min-width:0"></span>`;
 
     d.innerHTML = indent
+      + `<span class="lgrip" title="Drag to reorder or reparent">&#x22EE;&#x22EE;</span>`
       + `<span class="li" onclick="togV('${item.id}',event)">${item.visible ? '&#x1F441;' : '&middot;'}</span>`
       + `<span class="li" onclick="togL('${item.id}',event)">${item.locked  ? '&#x1F512;' : '&middot;'}</span>`
       + `<span class="ln" style="color:${UI_TYPES.has(item.type) ? 'var(--pur)' : 'inherit'}">${esc(item.name)}</span>`
       + `<span class="lt" style="color:${typeColor(item)}">${item.type.slice(0, 3)}</span>`
       + `<span class="lz">${item.zIndex || 0}</span>`;
 
+    d.draggable   = true;
+    d.dataset.id  = item.id;
+
+    d.ondragstart = ev => {
+      ev.dataTransfer.setData('text/plain', item.id);
+      ev.dataTransfer.effectAllowed = 'move';
+      d.classList.add('dragging');
+    };
+    d.ondragend = () => {
+      d.classList.remove('dragging');
+      document.querySelectorAll('.lay').forEach(r => r.removeAttribute('data-drop'));
+    };
+    d.ondragover = ev => {
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = 'move';
+      const r = d.getBoundingClientRect();
+      const pct = (ev.clientY - r.top) / r.height;
+      d.dataset.drop = pct < 0.25 ? 'above' : pct > 0.75 ? 'below' : 'inside';
+    };
+    d.ondragleave = ev => {
+      // Only clear if we've really left this row (not entered a child span)
+      const r = d.getBoundingClientRect();
+      if (ev.clientX < r.left || ev.clientX > r.right ||
+          ev.clientY < r.top  || ev.clientY > r.bottom) {
+        delete d.dataset.drop;
+      }
+    };
+    d.ondrop = ev => {
+      ev.preventDefault();
+      const srcId = ev.dataTransfer.getData('text/plain');
+      const mode  = d.dataset.drop;
+      delete d.dataset.drop;
+      if (srcId && srcId !== item.id && mode) onLayerDrop(srcId, item.id, mode);
+    };
+
     d.onclick = ev => {
       if (ev.target.classList.contains('li')) return;
+      if (ev.target.classList.contains('lgrip')) return;
       if (ev.ctrlKey) {
         S.sel.has(item.id) ? S.sel.delete(item.id) : S.sel.add(item.id);
       } else {
@@ -72,6 +183,67 @@ function updateLayers() {
   for (const ch of kids) {
     if (!pool.find(e => e.id === ch.parentId)) row(ch, 0);
   }
+
+  // Drop zone at the bottom of the layers panel → unparent / move to root
+  const endZone = document.createElement('div');
+  endZone.className = 'lay-end';
+  endZone.ondragover = ev => { ev.preventDefault(); endZone.classList.add('over'); };
+  endZone.ondragleave = () => endZone.classList.remove('over');
+  endZone.ondrop = ev => {
+    ev.preventDefault();
+    endZone.classList.remove('over');
+    const srcId = ev.dataTransfer.getData('text/plain');
+    if (srcId) onLayerDrop(srcId, null, 'root');
+  };
+  wrap.appendChild(endZone);
+}
+
+/* ═══════════════════════════════════════════
+   LAYER DRAG-DROP HANDLER
+   mode = 'above' | 'below' | 'inside' | 'root'
+═══════════════════════════════════════════ */
+function onLayerDrop(srcId, dstId, mode) {
+  const src = S.els.find(e => e.id === srcId);
+  if (!src) return;
+  if (srcId === dstId) return;
+
+  // Cycle guard: reject parenting to own descendant
+  if (mode === 'inside' && dstId) {
+    let cur = dstId;
+    while (cur) {
+      if (cur === srcId) { toast && toast('Cannot parent into own descendant'); return; }
+      const p = S.els.find(e => e.id === cur);
+      cur = p ? p.parentId : null;
+    }
+  }
+
+  pushH();
+
+  if (mode === 'root') {
+    src.parentId = null;
+  } else if (mode === 'inside') {
+    src.parentId = dstId;
+  } else if (mode === 'above' || mode === 'below') {
+    const dst = S.els.find(e => e.id === dstId);
+    if (!dst) return;
+    // Move src next to dst in the same parent group
+    src.parentId = dst.parentId || null;
+    // zIndex adjustment: 'above' in UI = higher zIndex (on top), 'below' = lower
+    // Layers panel sorts desc (highest first at top), so 'above' = higher z.
+    const delta = mode === 'above' ? 1 : -1;
+    src.zIndex = (dst.zIndex || 0) + delta;
+    // Nudge any element that now ties with src's new zIndex away
+    for (const o of S.els) {
+      if (o.id === src.id) continue;
+      if ((o.zIndex || 0) === (src.zIndex || 0)) {
+        o.zIndex = (o.zIndex || 0) + (delta > 0 ? -1 : 1);
+      }
+    }
+  }
+
+  updateLayers();
+  updateProps();
+  render();
 }
 
 function togV(id, e) {
@@ -132,31 +304,17 @@ function updateProps() {
               ${opts}
             </select>`;
   };
-  const fnSig = () => {
-    const fn = `On${vn(el)}${el.callback || ''}`;
-    switch (el.type) {
-      case 'Checkbox': return `${fn}(state: boolean)`;
-      case 'Keybind':  return `${fn}(key: string)`;
-      case 'Dropdown': return `${fn}(selected: string, index: number)`;
-      case 'Slider':   return `${fn}(value: number)`;
-      case 'Button':   return el.toggleMode ? `${fn}(state: boolean)` : `${fn}()`;
-      default:         return fn;
-    }
-  };
-  const bodyHint = () => {
-    switch (el.type) {
-      case 'Checkbox': return 'state: boolean &mdash; true = checked &bull; use wait(n) for waiting';
-      case 'Keybind':  return 'key: string &mdash; e.g. &quot;Insert&quot;, &quot;F1&quot;, &quot;A&quot;';
-      case 'Dropdown': return 'selected: string, index: number &mdash; index is 1-based';
-      case 'Slider':   return 'value: number &mdash; current slider value';
-      case 'Button':   return el.toggleMode ? 'state: boolean &mdash; true when toggled on &bull; use wait(n) for waiting' : '(no parameters)';
-    }
-  };
+  // fnSig / bodyHint / bodyExample / bodyScope are shared with the Callbacks tab
+  // (defined at module scope below — `cbFnSig`, `cbBodyHint`, `cbBodyExample`).
+  const fnSig       = () => cbFnSig(el);
+  const bodyHint    = () => cbBodyHint(el);
+  const bodyExample = () => cbBodyExample(el);
   const bodyTA = () =>
     `<div class="pgt" style="margin-top:8px;border-top:none">Body</div>
      <div class="info" style="margin-bottom:5px">${bodyHint()}</div>
-     <textarea class="ta cbody" rows="5" spellcheck="false"
-       placeholder="-- write your Lua code here"
+     <textarea class="ta cbody" rows="10" spellcheck="false"
+       style="resize:vertical;min-height:120px;font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.45;width:100%;box-sizing:border-box"
+       placeholder="${esc(bodyExample())}"
        onchange="sp('${el.id}','callbackBody',this.value)">${esc(el.callbackBody || '')}</textarea>`;
 
   // ── name field ──────────────────────────────────────────────

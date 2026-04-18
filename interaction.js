@@ -25,7 +25,7 @@ function ptSegDist(px, py, x1, y1, x2, y2) {
 function hitTest(pos) {
   const hits = [];
   for (const el of S.els) {
-    if (!el.visible || el.locked) continue;
+    if (!el.visible) continue;
     if (!el.shared && el.tabId && el.tabId !== S.activeTab) continue;
     const b   = bounds(el);
     const pad = Math.max(el.thickness || 1, 5 / S.zoom);
@@ -127,6 +127,60 @@ function doSnap(el) {
 }
 
 /* ═══════════════════════════════════════════
+   SNAP RESIZE — snap only moving edges
+   dir: 'n'|'s'|'e'|'w'|'ne'|'nw'|'se'|'sw'
+═══════════════════════════════════════════ */
+function doSnapResize(el, dir) {
+  if (!el || el.type === 'Line' || el.type === 'Polyline' || el.type === 'Circle') return;
+  const DIST = SETTINGS.snapDist / S.zoom;
+  const b    = bounds(el);
+  const moveE = dir.includes('e');
+  const moveW = dir.includes('w');
+  const moveN = dir.includes('n');
+  const moveS = dir.includes('s');
+  let snappedX = false, snappedY = false;
+  for (const o of S.els) {
+    if (o.id === el.id || !o.visible) continue;
+    const ob = bounds(o);
+    if (!snappedX) {
+      const edgesToCheck = [];
+      if (moveE) edgesToCheck.push(['e', b.x + b.w]);
+      if (moveW) edgesToCheck.push(['w', b.x]);
+      for (const [edge, a] of edgesToCheck) {
+        for (const r of [ob.x, ob.x + ob.w]) {
+          if (Math.abs(a - r) < DIST) {
+            if (edge === 'e') { el.w = Math.max(8, el.w + (r - a)); }
+            else              { const newX = r; const newW = Math.max(8, (b.x + b.w) - newX); el.x = (b.x + b.w) - newW; el.w = newW; }
+            snaps.push({ x: r, refY: ob.y + ob.h / 2 });
+            snappedX = true;
+            break;
+          }
+        }
+        if (snappedX) break;
+      }
+    }
+    if (!snappedY) {
+      const edgesToCheck = [];
+      if (moveS) edgesToCheck.push(['s', b.y + b.h]);
+      if (moveN) edgesToCheck.push(['n', b.y]);
+      for (const [edge, a] of edgesToCheck) {
+        for (const r of [ob.y, ob.y + ob.h]) {
+          if (Math.abs(a - r) < DIST) {
+            if (edge === 's') { el.h = Math.max(8, el.h + (r - a)); }
+            else              { const newY = r; const newH = Math.max(8, (b.y + b.h) - newY); el.y = (b.y + b.h) - newH; el.h = newH; }
+            snaps.push({ y: r, refX: ob.x + ob.w / 2 });
+            snappedY = true;
+            break;
+          }
+        }
+        if (snappedY) break;
+      }
+    }
+    if (snappedX && snappedY) break;
+  }
+}
+
+/* ═══════════════════════════════════════════
    TOP SQUARE AT POS  (for auto-parenting)
 ═══════════════════════════════════════════ */
 function topSqAt(pos) {
@@ -195,7 +249,7 @@ CV.addEventListener('mousedown', e => {
   // Check resize handles first
   for (const id of S.sel) {
     const el = S.els.find(e => e.id === id);
-    if (!el) continue;
+    if (!el || el.locked) continue;
     const h = handleAt(pos, el);
     if (h) {
       const b = bounds(el);
@@ -226,22 +280,28 @@ CV.addEventListener('mousedown', e => {
     }
     _lastHit = hit.id;
 
-    // Children whose parent is also selected must be skipped —
-    // they follow automatically because their x/y are relative to the parent.
-    const selIds = new Set(S.sel);
-    const offs = [];
-    for (const id of S.sel) {
-      const el = S.els.find(e => e.id === id);
-      if (!el || el.locked) continue;
-      if (el.parentId && selIds.has(el.parentId)) continue;
-      offs.push(
-        (el.type === 'Line' || el.type === 'Polyline')
-          ? { id, x1: el.x1, y1: el.y1, x2: el.x2, y2: el.y2 }
-          : { id, x: el.x, y: el.y }
-      );
+    // Locked elements can be selected but not moved
+    if (hit.locked) {
+      toast('Element locked — click 🔒 in layers to unlock');
+      drg = null;
+    } else {
+      // Children whose parent is also selected must be skipped —
+      // they follow automatically because their x/y are relative to the parent.
+      const selIds = new Set(S.sel);
+      const offs = [];
+      for (const id of S.sel) {
+        const el = S.els.find(e => e.id === id);
+        if (!el || el.locked) continue;
+        if (el.parentId && selIds.has(el.parentId)) continue;
+        offs.push(
+          (el.type === 'Line' || el.type === 'Polyline')
+            ? { id, x1: el.x1, y1: el.y1, x2: el.x2, y2: el.y2 }
+            : { id, x: el.x, y: el.y }
+        );
+      }
+      // pushH deferred to first actual pixel moved (avoids undo entry on plain click)
+      drg = offs.length ? { type: 'move', start: pos, offs, pushed: false } : null;
     }
-    // pushH deferred to first actual pixel moved (avoids undo entry on plain click)
-    drg = { type: 'move', start: pos, offs, pushed: false };
   } else {
     S.sel.clear();
     _lastHit = null;
@@ -272,9 +332,12 @@ document.addEventListener('mousemove', e => {
   const dy = pos.y - drg.start.y;
 
   if (drg.type === 'move') {
-    // Defer history push to first actual movement (avoids undo entry on plain click)
-    if (!drg.pushed && (Math.abs(dx) > 1 || Math.abs(dy) > 1)) {
-      pushH(); drg.pushed = true;
+    // Defer history push + position writes to past the click-vs-drag threshold
+    // so pure clicks never shift elements even slightly.
+    if (!drg.pushed) {
+      if (Math.abs(dx) <= 4 && Math.abs(dy) <= 4) return;
+      pushH();
+      drg.pushed = true;
     }
     for (let i = 0; i < drg.offs.length; i++) {
       const off = drg.offs[i];
@@ -295,19 +358,34 @@ document.addEventListener('mousemove', e => {
     if (!el) return;
     const s   = drg.s0;
     const dir = drg.handle.dir;
+
+    // Shift = axis-lock (use dominant axis only)
+    // Ctrl  = preserve original aspect ratio
+    let ddx = dx, ddy = dy;
+    if (e.shiftKey) {
+      if (Math.abs(dx) > Math.abs(dy)) ddy = 0; else ddx = 0;
+    }
+    if (e.ctrlKey && s.w && s.h) {
+      const r = s.w / s.h;
+      if (Math.abs(ddx) > Math.abs(ddy)) ddy = ddx / r;
+      else                                ddx = ddy * r;
+    }
+
     if (el.type === 'Circle') {
-      el.radius = Math.max(4, s.radius + Math.max(dx, dy) / 2);
+      el.radius = Math.max(4, s.radius + Math.max(ddx, ddy) / 2);
     } else if (el.type === 'Line' || el.type === 'Polyline') {
       if (dir.includes('nw') || dir.includes('w') || dir.includes('sw')) {
-        el.x1 = s.x1 + dx; el.y1 = s.y1 + dy;
+        el.x1 = s.x1 + ddx; el.y1 = s.y1 + ddy;
       } else {
-        el.x2 = s.x2 + dx; el.y2 = s.y2 + dy;
+        el.x2 = s.x2 + ddx; el.y2 = s.y2 + ddy;
       }
     } else {
-      if (dir.includes('e'))  el.w  = Math.max(8, s.w  + dx);
-      if (dir.includes('s'))  el.h  = Math.max(8, s.h  + dy);
-      if (dir.includes('w')) { el.x = s.x + dx; el.w = Math.max(8, s.w - dx); }
-      if (dir.includes('n')) { el.y = s.y + dy; el.h = Math.max(8, s.h - dy); }
+      if (dir.includes('e'))  el.w  = Math.max(8, s.w  + ddx);
+      if (dir.includes('s'))  el.h  = Math.max(8, s.h  + ddy);
+      if (dir.includes('w')) { el.x = s.x + ddx; el.w = Math.max(8, s.w - ddx); }
+      if (dir.includes('n')) { el.y = s.y + ddy; el.h = Math.max(8, s.h - ddy); }
+      // Snap moving edges (unless Alt held)
+      if (!e.altKey) doSnapResize(el, dir);
     }
   }
 
@@ -386,7 +464,7 @@ function ctxDo(a) {
       n++;
     }
     toast(`Parented ${n} to ${sq.name}`);
-    updateLayers(); updateProps(); render();
+    updateLayers(); updateProps(); updateCallbacks(); render();
     return;
   }
 
@@ -405,7 +483,7 @@ function ctxDo(a) {
       }
       el.parentId = null;
     }
-    updateLayers(); updateProps(); render();
+    updateLayers(); updateProps(); updateCallbacks(); render();
     toast('Unparented');
     return;
   }
@@ -453,7 +531,14 @@ function doPaste() {
   for (const el of clip) {
     const n = JSON.parse(JSON.stringify(el));
     n.id    = el.type[0] + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
-    n.name  = el.name + ' copy';
+
+    // Strip any trailing " copy" or " copy N" to find the base name,
+    // then find the next unused "base copy", "base copy 2", "base copy 3"...
+    const base = (el.name || '').replace(/ copy( \d+)?$/, '');
+    let candidate = `${base} copy`;
+    let k = 2;
+    while (S.els.some(e => e.name === candidate)) candidate = `${base} copy ${k++}`;
+    n.name  = candidate;
     n.tabId = S.activeTab;
     delete n._img;
     delete n._ok;
@@ -468,7 +553,7 @@ function doPaste() {
     S.sel.add(n.id);
     if (n.type === 'Image' && n.url) loadImg(n);
   }
-  updateLayers(); updateProps(); render();
+  updateLayers(); updateProps(); updateCallbacks(); render();
 }
 
 function delSel() {
@@ -483,7 +568,7 @@ function delSel() {
   S.els = S.els.filter(e => !S.sel.has(e.id));
   S.sel.clear();
   _lastHit = null;
-  updateLayers(); updateProps(); render();
+  updateLayers(); updateProps(); updateCallbacks(); render();
 }
 
 /* ═══════════════════════════════════════════
@@ -502,7 +587,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     S.sel.clear();
     _lastHit = null;
-    updateLayers(); updateProps(); render();
+    updateLayers(); updateProps(); updateCallbacks(); render();
   }
 
   // Arrow-key nudge (Shift = ×10)

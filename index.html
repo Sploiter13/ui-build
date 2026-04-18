@@ -131,13 +131,18 @@
     <div id="layers"></div>
   </div>
 
+  <div class="split" id="splitL" data-side="left"  title="Drag to resize"></div>
+
   <div id="cvwrap">
     <canvas id="cv" width="1920" height="1080"></canvas>
   </div>
 
+  <div class="split" id="splitR" data-side="right" title="Drag to resize"></div>
+
   <div id="right">
     <div class="rtabs">
       <div class="rtab act" id="tp" onclick="switchTab('p')">Properties</div>
+      <div class="rtab"     id="tk" onclick="switchTab('k')">Callbacks</div>
       <div class="rtab"     id="tc" onclick="switchTab('c')">Code</div>
     </div>
 
@@ -148,6 +153,10 @@
           Select an element<br>to edit properties
         </div>
       </div>
+    </div>
+
+    <div id="kw">
+      <div id="ki"></div>
     </div>
 
     <div id="cw">
@@ -255,6 +264,9 @@
       <option value="immediate">Immediate (DrawingImmediate)</option>
     </select>
   </div>
+  <div class="sr" title="When exporting, offset every position so the UI is centered on the player's real screen regardless of their resolution."><span class="sl">Center on Viewport</span>
+    <input type="checkbox" class="si-chk" onchange="setSett('centerOnViewport',this.checked)">
+  </div>
 
   <div class="sg">ACCENT COLOR</div>
   <div class="saccents" id="saccents"></div>
@@ -294,8 +306,10 @@ const TUT_STEPS = [
   { sel: '#cvwrap',            title: 'The Canvas',         body: 'Your Roblox screen preview. Scroll to zoom, hold Space + drag to pan. Right-click elements for extra options.' },
   { sel: '#tabbar',            title: 'Tabs',               body: 'Tabs are separate pages in your UI — like an Aimbot tab and a Visuals tab. Click + to add one. Elements belong to whichever tab was active when placed, or you can mark them Shared so they show on every tab. Use a Keybind or Button with "Switch Tab" action to navigate between them in-game.' },
   { sel: '#right',             title: 'Widget Scripts',     body: 'Select any widget (Checkbox, Slider, etc.) and open Properties. Scroll down to find the Callback Body — paste your Lua code there. It runs whenever the widget fires: toggle checked, value changed, key pressed, etc. The generated code wraps it in a proper Luau function automatically.' },
-  { sel: '#layers',            title: 'Layers',             body: 'Every element listed here. Click to select, drag to reorder draw order. Higher Z-index = drawn on top.' },
+  { sel: '#layers',            title: 'Layers',             body: 'Every element listed here. Click to select, drag a row up/down to reorder draw order (higher Z-index draws on top), or drop a row ONTO another row to parent it inside — Roblox-Studio style.' },
+  { sel: '#layers',             title: 'Locked Elements',    body: 'Click the \u{1F512} icon in a layer row to lock an element. Locked items stay clickable so you can still select them, but they won\u2019t move when you drag on the canvas — great for backgrounds or frames you want to leave alone.' },
   { sel: '#right',             title: 'Properties',         body: 'Select any element to edit color, size, text, opacity, and more. Elements can be parented to a Square so they move with it when dragged.' },
+  { sel: '#tk',                title: 'Callbacks Tab',      body: 'Every interactive widget (Checkbox, Keybind, Dropdown, Slider, Button) shows up here in one list — signature, scope, and body in a bigger editor. Filter by type, search by name, or hit Go to jump to the widget on the canvas. Your bodies run in RunService.PostLocal (after PreLocal input/state), so Render stays pure-draw and PreLocal stays pure-logic.' },
   { sel: '#tc',                title: 'Code Output',        body: 'Click here to see the generated Luau. Hit Copy and paste it straight into your Severe script. Done.' },
   { sel: '#si-drawmode-bar',   title: 'Drawing Mode',       body: 'Static = Drawing.new (persistent objects). Immediate = DrawingImmediate (redrawn every frame, leaner Render). Both modes generate fully optimized Luau.' },
 ];

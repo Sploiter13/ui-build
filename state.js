@@ -45,15 +45,16 @@ const ACCENT_PRESETS = {
 };
 
 const SETTINGS = {
-  fontSize:   12,
-  font:       'JetBrains Mono',
-  compact:    false,
-  showGrid:   true,
-  gridSize:   24,
-  snapDist:   7,
-  leftWidth:  192,
-  rightWidth: 250,
-  accent:     'blue',
+  fontSize:         12,
+  font:             'JetBrains Mono',
+  compact:          false,
+  showGrid:         true,
+  gridSize:         24,
+  snapDist:         7,
+  leftWidth:        192,
+  rightWidth:       250,
+  accent:           'blue',
+  centerOnViewport: false,   // Offset all positions so the UI centers on the player's actual screen
 };
 
 /* ═══════════════════════════════════════════

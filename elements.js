@@ -170,8 +170,23 @@ function bounds(el) {
    RENDER ORDER
 ═══════════════════════════════════════════ */
 function sortedEls() {
+  // Resolve effective zIndex: a child is always ≥ parent's resolved z + 1, so a parent
+  // with a lower zIndex than its descendants never draws on top of them.
+  const _zCache = new Map();
+  const resolveZ = (e) => {
+    if (_zCache.has(e.id)) return _zCache.get(e.id);
+    if (!e.parentId) { const z = e.zIndex || 0; _zCache.set(e.id, z); return z; }
+    const par = S.els.find(x => x.id === e.parentId);
+    if (!par) { const z = e.zIndex || 0; _zCache.set(e.id, z); return z; }
+    // Temporary sentinel to guard against cycles
+    _zCache.set(e.id, e.zIndex || 0);
+    const pz = resolveZ(par);
+    const z  = Math.max(e.zIndex || 0, pz + 1);
+    _zCache.set(e.id, z);
+    return z;
+  };
   return [...S.els].sort((a, b) => {
-    const dz = (a.zIndex || 0) - (b.zIndex || 0);
+    const dz = resolveZ(a) - resolveZ(b);
     if (dz) return dz;
     if (a.parentId === b.id) return  1;
     if (b.parentId === a.id) return -1;
@@ -231,6 +246,15 @@ function sp(id, k, v) {
   _codeDirty = true;
   if (k === 'url' && el.type === 'Image') loadImg(el);
   if (k === 'name' || k === 'visible' || k === 'zIndex') updateLayers();
+  // Keys that affect what the Callbacks tab renders (name in header, action
+  // toggles body-edit eligibility, toggleMode swaps Button signature,
+  // callback/callbackBody are the primary content, tab/shared affect the
+  // [tab] badge).
+  if (k === 'name' || k === 'action' || k === 'toggleMode' ||
+      k === 'callback' || k === 'callbackBody' ||
+      k === 'tabId' || k === 'shared') {
+    if (typeof updateCallbacks === 'function') updateCallbacks();
+  }
   render();
   updateProps();
 }
