@@ -355,7 +355,11 @@ function render() {
         ctx.textBaseline = 'bottom';
         ctx.textAlign    = 'center';
         ctx.fillStyle    = rgba('#ffffff', 0.7);
-        ctx.fillText((el.curVal || 0) + (el.suffix || ''), b.x + b.w / 2, b.y - 2);
+        // Trim floating-point noise: integer values print bare, fractional
+        // values are rounded to 2 decimals with trailing zeros stripped.
+        const _sv = el.curVal || 0;
+        const _sText = Number.isInteger(_sv) ? String(_sv) : Number(_sv.toFixed(2)).toString();
+        ctx.fillText(_sText + (el.suffix || ''), b.x + b.w / 2, b.y - 2);
         ctx.textAlign = 'left';
         break;
       }

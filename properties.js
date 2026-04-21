@@ -3,6 +3,30 @@
 /* ═══════════════════════════════════════════
    UTILITIES
 ═══════════════════════════════════════════ */
+// Heuristic Lua indent pass — runs on textarea blur to normalize pasted
+// or hand-written callback bodies.  Intentionally simple:
+//   • 4-space indentation, keywords drive depth
+//   • opens: `function`, `if`, `for`, `while`, `do`, `repeat`, `then`, `else`, `elseif`, trailing `{`, trailing `(`
+//   • closes: `end`, `until`, `else`, `elseif`, `}`, `)`
+//   • skips inline forms like `if x then y end` (too hard without a parser)
+function formatLuaBody(src) {
+  if (!src || !src.includes('\n')) return src;
+  const INC = /\b(?:function|if|for|while|do|repeat|then|else|elseif)\b.*$|\{\s*$|\(\s*$/;
+  const DEC = /^\s*(?:end|until|else|elseif|\}|\))\b/;
+  const lines = src.replace(/\t/g, '    ').split('\n').map(l => l.replace(/^\s+/, ''));
+  let depth = 0;
+  const out = [];
+  for (const raw of lines) {
+    if (!raw) { out.push(''); continue; }
+    const dedent = DEC.test(raw);
+    const here = Math.max(0, depth - (dedent ? 1 : 0));
+    out.push('    '.repeat(here) + raw);
+    if (INC.test(raw) && !/\bend\b\s*(?:$|--)/.test(raw)) depth++;
+    else if (dedent) depth = Math.max(0, depth - 1);
+  }
+  return out.join('\n');
+}
+
 function esc(s) {
   return String(s)
     .replace(/&/g, '&amp;')
@@ -81,12 +105,16 @@ function cbBodyScope(el) {
     default:         return common;
   }
 }
-// Is this widget's callback action a user CustomFunction (vs. ToggleUI / switchTab:xxx)?
+// Is this widget's callback action a user CustomFunction (vs. ToggleUI / switchTab / toggleTarget)?
 // Only CustomFunction widgets have an editable body.
 function cbHasBody(el) {
   if (!UI_TYPES.has(el.type)) return false;
   const act = el.action || 'CustomFunction';
-  if (el.type === 'Keybind' && (act === 'ToggleUI' || act.startsWith('switchTab:'))) return false;
+  if (el.type === 'Keybind' && (
+        act === 'ToggleUI' ||
+        act.startsWith('switchTab:') ||
+        act.startsWith('toggleTarget:')
+      )) return false;
   if (el.type === 'Button'  && act.startsWith('switchTab:')) return false;
   return true;
 }
@@ -94,6 +122,25 @@ function cbHasBody(el) {
 /* ═══════════════════════════════════════════
    LAYERS PANEL
 ═══════════════════════════════════════════ */
+// Module-scoped drag state for the layers panel.  Survives updateLayers()
+// re-renders that happen mid-drag (e.g. when a visibility toggle triggers
+// re-render and the original row's ondragend handler vanishes with it).
+let _dragLayerId = null;
+
+// Register a single document-level dragend listener once, so cleanup is
+// detached from any individual row's lifecycle.
+if (!window._layDragBound) {
+  window._layDragBound = true;
+  document.addEventListener('dragend', () => {
+    _dragLayerId = null;
+    document.querySelectorAll('.lay').forEach(r => {
+      r.classList.remove('dragging');
+      r.removeAttribute('data-drop');
+    });
+    document.querySelectorAll('.lay-end').forEach(z => z.classList.remove('over'));
+  });
+}
+
 function updateLayers() {
   const wrap  = document.getElementById('layers');
   wrap.innerHTML = '';
@@ -129,12 +176,11 @@ function updateLayers() {
     d.ondragstart = ev => {
       ev.dataTransfer.setData('text/plain', item.id);
       ev.dataTransfer.effectAllowed = 'move';
+      _dragLayerId = item.id;
       d.classList.add('dragging');
     };
-    d.ondragend = () => {
-      d.classList.remove('dragging');
-      document.querySelectorAll('.lay').forEach(r => r.removeAttribute('data-drop'));
-    };
+    // Cleanup is handled by the document-level dragend listener above, which
+    // survives any updateLayers() re-renders that detach this row's handlers.
     d.ondragover = ev => {
       ev.preventDefault();
       ev.dataTransfer.dropEffect = 'move';
@@ -196,6 +242,13 @@ function updateLayers() {
     if (srcId) onLayerDrop(srcId, null, 'root');
   };
   wrap.appendChild(endZone);
+
+  // If a drag is in flight and the panel was just re-rendered, re-apply the
+  // visual indicator to the new row for the dragged element.
+  if (_dragLayerId) {
+    const row = wrap.querySelector(`.lay[data-id="${_dragLayerId}"]`);
+    if (row) row.classList.add('dragging');
+  }
 }
 
 /* ═══════════════════════════════════════════
@@ -315,7 +368,8 @@ function updateProps() {
      <textarea class="ta cbody" rows="10" spellcheck="false"
        style="resize:vertical;min-height:120px;font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.45;width:100%;box-sizing:border-box"
        placeholder="${esc(bodyExample())}"
-       onchange="sp('${el.id}','callbackBody',this.value)">${esc(el.callbackBody || '')}</textarea>`;
+       onchange="sp('${el.id}','callbackBody',formatLuaBody(this.value))">${esc(el.callbackBody || '')}</textarea>
+     <div class="info" style="margin-top:4px;opacity:.7">Auto-indents on blur (click out / Tab away). Inline blocks like <code>if x then y end</code> are left alone.</div>`;
 
   // ── name field ──────────────────────────────────────────────
   let h = `<input class="pnm" value="${esc(el.name)}"
@@ -436,16 +490,35 @@ function updateProps() {
          ).join('')}
        </select>`;
     const kbAction = el.action || 'CustomFunction';
+    // Collect every toggleable widget in the project so the key can flip any of them.
+    // Keybinds work across tabs, so we include targets from every tab (not just the active one).
+    const toggleTargets = S.els.filter(e =>
+      e.type === 'Checkbox' || (e.type === 'Button' && e.toggleMode)
+    );
     const actionSel = `<select class="pi" onchange="sp('${el.id}','action',this.value)">
       <option value="CustomFunction"${kbAction === 'CustomFunction' ? ' selected' : ''}>Custom Function</option>
       <option value="ToggleUI"${kbAction === 'ToggleUI' ? ' selected' : ''}>Toggle UI</option>
       ${S.tabs.map((t, i) =>
         `<option value="switchTab:${t.id}"${kbAction === `switchTab:${t.id}` ? ' selected' : ''}>Switch Tab → ${esc(t.name)}</option>`
       ).join('')}
+      ${toggleTargets.map(t =>
+        `<option value="toggleTarget:${t.id}"${kbAction === `toggleTarget:${t.id}` ? ' selected' : ''}>Toggle → ${esc(t.name)} (${t.type === 'Button' ? 'Button' : 'Checkbox'})</option>`
+      ).join('')}
     </select>`;
     h += `<div class="pg"><div class="pgt">Keybind</div>`;
     h += r('Default Key',  keySel());
     h += r('Action',       actionSel);
+    if (kbAction.startsWith('toggleTarget:')) {
+      const tgtId  = kbAction.slice('toggleTarget:'.length);
+      const tgtEl  = S.els.find(e => e.id === tgtId);
+      if (tgtEl) {
+        const tgtTab = S.tabs.find(t => t.id === tgtEl.tabId);
+        const loc    = tgtEl.shared ? 'shared' : (tgtTab ? `on tab “${esc(tgtTab.name)}”` : 'untracked tab');
+        h += `<div class="info">Flips <b>${esc(tgtEl.name)}</b>'s state (${loc}). The target's callback body still runs in response, same as a click.</div>`;
+      } else {
+        h += `<div class="info" style="color:var(--org)">⚠ Toggle target no longer exists — this keybind will be silent. Pick a new target or switch action back to Custom Function.</div>`;
+      }
+    }
     h += r('Filled',       chk('filled'));
     h += r('Text Size',    num('textSize', 4));
     h += r('Text Color',   crow('textColor'));
@@ -463,19 +536,22 @@ function updateProps() {
 
   // ── Dropdown ─────────────────────────────────────────────────
   if (el.type === 'Dropdown') {
+    const ddDyn = !!(el.dynamicOptions && el.dynamicOptions.trim());
     h += `<div class="pg"><div class="pgt">Dropdown</div>`;
-    h += `<div class="pr"><span class="pl">Options</span>
-            <textarea class="ta" onchange="sp('${el.id}','options',this.value)">${esc(el.options || '')}</textarea>
-          </div>`;
-    h += `<div class="info">One option per comma. Default Index is 0-based (0 = first option)</div>`;
-    h += r('Default Index', num('defaultIndex', 0));
+    if (!ddDyn) {
+      h += `<div class="pr"><span class="pl">Options</span>
+              <textarea class="ta" onchange="sp('${el.id}','options',this.value)">${esc(el.options || '')}</textarea>
+            </div>`;
+      h += `<div class="info">One option per comma. Default Index is 0-based (0 = first option)</div>`;
+      h += r('Default Index', num('defaultIndex', 0));
+    }
     h += `<div class="pr"><span class="pl">Dynamic Options</span>
-            <textarea class="ta" rows="3"
-              placeholder="Leave blank for static options.&#10;Lua expr returning {string}, e.g.:&#10;(function() local t={} for _,c in ipairs(workspace:GetChildren()) do t[#t+1]=c.Name end return t end)()"
+            <textarea class="ta" rows="5"
+              placeholder="Leave blank for static options.&#10;Expression OR statement block returning a sequence:&#10;&#10;  Players:GetPlayers()&#10;&#10;  local t = {}&#10;  for _, p in Players:GetPlayers() do&#10;    t[#t+1] = p.Name&#10;  end&#10;  return t"
               onchange="sp('${el.id}','dynamicOptions',this.value)">${esc(el.dynamicOptions||'')}</textarea>
           </div>`;
-    if (el.dynamicOptions && el.dynamicOptions.trim()) {
-      h += `<div class="info">Options refresh each time the dropdown opens. Static list above is ignored at runtime.</div>`;
+    if (ddDyn) {
+      h += `<div class="info">Lua that returns a sequence. A single expression works (<code>Players:GetPlayers()</code>) or paste a multi-line block ending in <code>return &lt;table&gt;</code> — statements are auto-wrapped in a function. Re-evaluated every frame while the dropdown is open. Non-string items render via <code>tostring()</code>; the callback's <code>selected</code> arg is the <code>tostring()</code> form.</div>`;
       h += r('Max Slots', `<input class="pi" type="number" min="1" max="100" value="${el.maxOptions||20}" onchange="sp('${el.id}','maxOptions',+this.value)">`);
       h += `<div class="info">Pre-allocates Drawing slots. Set to the max number of items the expression can return.</div>`;
     }
@@ -498,8 +574,8 @@ function updateProps() {
     h += `<div class="pg"><div class="pgt">Slider</div>`;
     h += r('Min Value',    num('minVal', -99999));
     h += r('Max Value',    num('maxVal', -99999));
-    h += r('Current Value',num('curVal', -99999));
-    h += r('Step',         num('step', 1));
+    h += r('Current Value',num('curVal', -99999, el.step || 1));
+    h += r('Step',         num('step', 0, 0.01));
     h += r('Knob Color',   crow('knobColor'));
     h += r('Corner Radius',num('rounding', 0));
     h += r('Value Suffix', txt('suffix', 'e.g. %'));
@@ -604,6 +680,7 @@ function switchActiveTab(id) {
   S.activeTab = id;
   S.sel.clear();
   _lastHit = null;
+  _lastClickPos = null;
   _codeDirty = true;
   updateTabBar();
   updateLayers();

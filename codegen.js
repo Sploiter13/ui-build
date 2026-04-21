@@ -8,6 +8,7 @@ function ser() {
     tabs:        S.tabs,
     activeTab:   S.activeTab,
     drawingMode: S.drawingMode,
+    sel:         Array.from(S.sel),
     els: S.els.map(e => {
       const c = { ...e };
       delete c._img;
@@ -30,6 +31,9 @@ function restoreSnap(snap) {
   S.tabs        = d.tabs      || [{ id: 'tab1', name: 'Tab 1' }];
   S.activeTab   = d.activeTab || S.tabs[0].id;
   S.drawingMode = d.drawingMode || 'static';
+  // Restore selection (filter out ids that no longer exist — safe against
+  // redo past a delete).  Older snapshots without `sel` yield an empty set.
+  S.sel = new Set(Array.isArray(d.sel) ? d.sel.filter(id => S.els.some(e => e.id === id)) : []);
 }
 
 function undo() {
@@ -38,8 +42,8 @@ function undo() {
   S.fut.push(ser());
   restoreSnap(S.hist.pop());
   S.els.filter(e => e.type === 'Image' && e.url).forEach(loadImg);
-  S.sel.clear();
   _lastHit = null;
+  _lastClickPos = null;
   rebuildCnt();
   updateTabBar(); updateLayers(); updateProps(); updateCallbacks(); render();
   toast('Undo');
@@ -51,8 +55,8 @@ function redo() {
   S.hist.push(ser());
   restoreSnap(S.fut.pop());
   S.els.filter(e => e.type === 'Image' && e.url).forEach(loadImg);
-  S.sel.clear();
   _lastHit = null;
+  _lastClickPos = null;
   rebuildCnt();
   updateTabBar(); updateLayers(); updateProps(); updateCallbacks(); render();
   toast('Redo');
@@ -242,7 +246,7 @@ function updateCallbacks() {
         </div>
         <div class="kbk-sig">${sig}</div>
         <textarea class="kbk-body" spellcheck="false" placeholder="${ex}"
-          onchange="sp('${el.id}','callbackBody',this.value)">${body}</textarea>
+          onchange="sp('${el.id}','callbackBody',formatLuaBody(this.value))">${body}</textarea>
       </div>`;
   }
 
@@ -324,6 +328,17 @@ function fn(n) {
   return Number.isInteger(n) ? String(n) : Number(n).toFixed(2);
 }
 
+// Wrap a dynamic-Dropdown options expression so the user can paste either a
+// single Lua expression (e.g. `Players:GetPlayers()`) or a statement block
+// that returns a sequence (e.g. `local t={} for _,p in … do t[#t+1]=p.Name end
+// return t`). When a newline or statement keyword is present we wrap the body
+// in an IIFE; otherwise we emit the expression verbatim.
+function wrapDynOptsExpr(rawExpr) {
+  const expr = (rawExpr || '').trim();
+  const hasStmt = /\n/.test(expr) || /\b(?:return|for|while|local|if|repeat)\b/.test(expr);
+  return hasStmt ? `(function() ${expr} end)()` : expr;
+}
+
 // Emit the unified RunService.PostLocal block that (1) dispatches event-driven
 // callbacks (Keybind CF, Dropdown, Slider, Button click) from their `E.<v>Fired`
 // flags set in PreLocal, and (2) runs the every-frame polling bodies for
@@ -336,7 +351,11 @@ function emitPostLocalInteractive(L, sorted, vn) {
   for (const el of sorted) {
     if (!UI_TYPES.has(el.type)) continue;
     const act = el.action || 'CustomFunction';
-    if (el.type === 'Keybind' && (act === 'ToggleUI' || act.startsWith('switchTab:'))) continue;
+    if (el.type === 'Keybind' && (
+          act === 'ToggleUI' ||
+          act.startsWith('switchTab:') ||
+          act.startsWith('toggleTarget:')
+        )) continue;
     if (el.type === 'Button'  && act.startsWith('switchTab:')) continue;
     if (el.type === 'Checkbox' || (el.type === 'Button' && el.toggleMode)) {
       if ((el.callbackBody || '').trim()) pollingWidgets.push(el);
@@ -420,6 +439,37 @@ function genLua() {
   const vn         = makeVn();
   const L          = [];
   const sorted     = sortedEls();
+  // Hot-path Color3 cache. Per-frame PreLocal paths (Button hover/toggle/tab-active
+  // color selection) must read from cached module-scope Color3 locals instead of
+  // inline `Color3.fromRGB(...)` constructors — each constructor call allocates a
+  // fresh userdata, adding per-button-per-frame GC pressure.
+  const hotColorCache = new Map();   // hex → local var name
+  const hotColorLines = [];
+  const hotColor = (hex) => {
+    const key = (hex || '#ffffff').toLowerCase();
+    if (!hotColorCache.has(key)) {
+      const name = `_HC${hotColorCache.size}`;
+      hotColorCache.set(key, name);
+      const [r, g, b] = hexRGB(key);
+      hotColorLines.push(`local ${name}: Color3 = Color3.fromRGB(${r}, ${g}, ${b})`);
+    }
+    return hotColorCache.get(key);
+  };
+  // Pre-seed the cache from every Button so that references further below
+  // (inside the PreLocal block that's emitted near line 1670+) can resolve
+  // the local name with no regard for emission order. The cache is emitted
+  // once, immediately before the IIFE body begins.
+  for (const el of sorted) {
+    if (el.type !== 'Button') continue;
+    hotColor(el.color);
+    hotColor(el.hoverColor || el.color);
+    if (el.toggleMode) hotColor(el.activeColor || '#2a5ec4');
+    hotColor(el.textColor || '#ffffff');
+    if ((el.action || '').startsWith('switchTab:')) {
+      hotColor(el.tabActiveColor || el.hoverColor || el.color);
+      hotColor(el.tabActiveTextColor || el.textColor || '#ffffff');
+    }
+  }
   // "Center on viewport" setting: offset all position writes by _OFF at runtime
   const centerOn   = !!(typeof SETTINGS !== 'undefined' && SETTINGS.centerOnViewport);
   const designW    = (typeof CV !== 'undefined' && CV.width)  ? CV.width  : 1920;
@@ -487,11 +537,47 @@ function genLua() {
   if (hasKB) L.push('local TableFind  = table.find');
   L.push('');
 
+  // Emit hot-path Color3 cache (populated during codegen by Button hover/toggle
+  // emission). Lives at module scope so the IIFE body can reference without any
+  // per-frame construction.
+  if (hotColorLines.length) {
+    L.push('-- Cached Color3 constants for per-frame hover/toggle writes.');
+    for (const line of hotColorLines) L.push(line);
+    L.push('');
+  }
+
   // ── IIFE wrapper: one function scope so locals count against it, not the chunk
   //    All Drawing objects and state go in table E — zero local registers per element
   L.push(';(function(): ()');
   L.push('');
   L.push('local E = {} -- holds all Drawing objects and widget state');
+  if (hasDD || hasBT || hasSL || hasCB || hasKB) {
+    L.push('');
+    L.push('-- Truncate a Drawing Text object so its rendered width fits maxW pixels.');
+    L.push('-- Appends an ellipsis when trimming. Binary-search on TextBounds for O(log n)');
+    L.push('-- property writes in the overflow path; zero-cost (one compare) when it fits.');
+    L.push('local function _FitText(d: any, maxW: number)');
+    L.push('    if d.TextBounds.X <= maxW then return end');
+    L.push('    local full: string = d.Text');
+    L.push('    local lo: number, hi: number = 0, #full');
+    L.push('    while lo < hi do');
+    L.push('        local mid: number = (lo + hi + 1) // 2');
+    L.push('        d.Text = string.sub(full, 1, mid) .. "..."');
+    L.push('        if d.TextBounds.X <= maxW then lo = mid else hi = mid - 1 end');
+    L.push('    end');
+    L.push('    d.Text = if lo == 0 then "..." else string.sub(full, 1, lo) .. "..."');
+    L.push('end');
+  }
+  if (hasSL) {
+    L.push('');
+    L.push('-- Format a slider value for display: integers render bare, floats use %g to');
+    L.push('-- trim trailing zeros (at most 6 significant digits).  Prevents rendering');
+    L.push('-- floating-point noise like "44.24047862250109".');
+    L.push('local function _FmtNum(v: number): string');
+    L.push('    if v == MathFloor(v) then return tostring(MathFloor(v)) end');
+    L.push('    return string.format("%g", v)');
+    L.push('end');
+  }
   if (centerOn) {
     L.push('');
     L.push('-- Center UI on viewport: shift every position by this offset');
@@ -518,6 +604,10 @@ function genLua() {
         L.push(`E.${v}Key         = "${el.defaultKey || 'Insert'}"`);
         L.push(`E.${v}Waiting     = false`);
         L.push(`E.${v}WaitReady   = false`);
+        // DisplayText is the final label string ("[Key]" or "[...]"). Updated only
+        // on state change (click-to-rebind / key-captured), never per frame. Dynamic
+        // Text mirrors reuse this same string ref — zero extra allocation.
+        L.push(`E.${v}DisplayText = "[${el.defaultKey || 'Insert'}]"`);
         if (kbEvt) L.push(`E.${v}Fired       = false`);
         break;
       }
@@ -539,6 +629,21 @@ function genLua() {
           L.push(`E.${v}OptionBackground${i} = Drawing.new("Square")`);
           L.push(`E.${v}OptionText${i}       = Drawing.new("Text")`);
         }
+        // Build flat ref arrays so the per-frame loop can index via integer
+        // (`E.<v>_OptBg[i]`) instead of rebuilding `"OptionBackground" .. i`
+        // strings every slot every frame. Eliminates ~8 string allocations
+        // per slot per frame for a dynamic dropdown.
+        if (slotCount > 0) {
+          const bgRefs = Array.from({ length: slotCount }, (_, i) => `E.${v}OptionBackground${i}`).join(', ');
+          const txRefs = Array.from({ length: slotCount }, (_, i) => `E.${v}OptionText${i}`).join(', ');
+          L.push(`E.${v}_OptBg     = { ${bgRefs} }`);
+          L.push(`E.${v}_OptTx     = { ${txRefs} }`);
+          if (isDynDD) {
+            // Cache last string rendered per slot so per-frame label updates skip
+            // `tostring()` + `_FitText` when the value hasn't changed.
+            L.push(`E.${v}_OptPrev   = table.create(${slotCount}, "")`);
+          }
+        }
         break;
       }
       case 'Slider':
@@ -549,6 +654,9 @@ function genLua() {
         L.push(`E.${v}Value    = ${el.curVal || 0}`);
         L.push(`E.${v}Dragging = false`);
         L.push(`E.${v}Fired    = false`);
+        // Cache the last Value rendered into the label so per-frame render can
+        // skip _FmtNum + string concat + _FitText when the value is unchanged.
+        L.push(`E.${v}_LabelPrev = ${el.curVal || 0}`);
         break;
       case 'Button': {
         const btAct  = el.action || 'CustomFunction';
@@ -811,7 +919,7 @@ function genLua() {
         L.push(`    E.${v}Background.Visible   = ${!!el.visible}`);
         L.push('');
         L.push(`    E.${v}Text.Position     = ${v2p(tx, ty)}`);
-        L.push(`    E.${v}Text.Text         = "[" .. E.${v}Key .. "]"`);
+        L.push(`    E.${v}Text.Text         = E.${v}DisplayText`);
         L.push(`    E.${v}Text.Size         = ${el.textSize || 16}`);
         L.push(`    E.${v}Text.Font         = ${el.font || 0}`);
         L.push(`    E.${v}Text.Color        = ${c3(el.textColor || '#000000')}`);
@@ -850,6 +958,7 @@ function genLua() {
           L.push(`    E.${v}Text.OutlineColor = ${outlineV3('#000000')}`);
         L.push(`    E.${v}Text.ZIndex    = ${z + 1}`);
         L.push(`    E.${v}Text.Visible   = ${!!el.visible}`);
+        L.push(`    _FitText(E.${v}Text, ${Math.max(1, el.w - 28)})`);
         L.push('');
         L.push(`    E.${v}Arrow.Position = ${v2p(atx, dty)}`);
         L.push(`    E.${v}Arrow.Text     = "\u25bc"`);
@@ -880,6 +989,7 @@ function genLua() {
           L.push(`    E.${v}OptionText${i}.Color     = ${c3(el.textColor || '#000000')}`);
           L.push(`    E.${v}OptionText${i}.ZIndex    = ${z + 3}`);
           L.push(`    E.${v}OptionText${i}.Visible   = false`);
+          if (!isDynDD3) L.push(`    _FitText(E.${v}OptionText${i}, ${Math.max(1, el.w - 16)})`);
         }
         break;
       }
@@ -915,13 +1025,14 @@ function genLua() {
         L.push(`    E.${v}Knob.Visible    = ${!!el.visible}`);
         L.push('');
         L.push(`    E.${v}Label.Position  = ${v2p(Math.round(b.x + el.w/2), b.y - 16)}`);
-        L.push(`    E.${v}Label.Text      = tostring(E.${v}Value) .. "${el.suffix || ''}"`);
+        L.push(`    E.${v}Label.Text      = _FmtNum(E.${v}Value) .. "${el.suffix || ''}"`);
         L.push(`    E.${v}Label.Size      = 11`);
         L.push(`    E.${v}Label.Font      = 0`);
         L.push(`    E.${v}Label.Color     = ${c3(el.color)}`);
         L.push(`    E.${v}Label.Center    = true`);
         L.push(`    E.${v}Label.ZIndex    = ${z + 2}`);
         L.push(`    E.${v}Label.Visible   = ${!!el.visible}`);
+        L.push(`    _FitText(E.${v}Label, ${Math.max(1, el.w)})`);
         break;
       }
 
@@ -951,8 +1062,36 @@ function genLua() {
           L.push(`    E.${v}Text.OutlineColor = ${outlineV3('#000000')}`);
         L.push(`    E.${v}Text.ZIndex       = ${z + 1}`);
         L.push(`    E.${v}Text.Visible      = ${!!el.visible}`);
+        L.push(`    _FitText(E.${v}Text, ${Math.max(1, el.w - 8)})`);
         break;
       }
+    }
+  }
+
+  // Dynamic text: init caches and one-shot constants so the per-frame loop
+  // can skip all work when the value hasn't changed.
+  if (dynTextEls && dynTextEls.length) {
+    L.push('');
+    let wrotePlayerName = false;
+    for (const el of dynTextEls) {
+      const v   = vn(el);
+      const src = el.dynamicSource || '';
+      if (src === 'playerName') {
+        // Session-constant: write once here, never re-read per frame.
+        if (!wrotePlayerName) {
+          L.push(`    local _PlayerName: string = game.Players.LocalPlayer.Name`);
+          wrotePlayerName = true;
+        }
+        L.push(`    E.${v}.Text = _PlayerName`);
+      } else if (src === 'tabName') {
+        // Start at a sentinel so the first PreLocal tick always writes.
+        L.push(`    E.${v}_Prev = -1`);
+      } else if (src === 'clock' || src === 'runtime') {
+        L.push(`    E.${v}_Prev = -1`);
+      } else if (src === 'custom' && (el.dynamicExpr || '').trim()) {
+        L.push(`    E.${v}_Prev = ""`);
+      }
+      // keybind: source reads E.<kv>DisplayText directly (no prev-cache needed).
     }
   }
 
@@ -961,6 +1100,15 @@ function genLua() {
 
   // ── PreLocal / PostLocal / Render ───────────────────────────
   // Helper: emit dynamic-text assignments (used in PreLocal so memory reads run every game tick)
+  //
+  // Every source is guarded so the hot path does NOT rebuild strings or even
+  // touch the Drawing.Text property when the underlying value is unchanged:
+  //   - playerName : constant per session → written once at init, skipped here
+  //   - tabName    : only writes when ActiveTab changes (stored in E.<v>_Prev)
+  //   - clock      : rebuilds os.date() only when the wall-clock second changes
+  //   - runtime    : rebuilds string.format only when elapsed-second changes
+  //   - custom     : tostring() result compared to cached; skip write if equal
+  //   - keybind:id : reads cached DisplayText ref (updated event-driven above)
   const emitDynTextLines = (indent) => {
     for (const el of dynTextEls) {
       const v   = vn(el);
@@ -969,19 +1117,44 @@ function genLua() {
         const kbEl = sorted.find(e => e.id === src.slice('keybind:'.length));
         if (kbEl) {
           const kv = vn(kbEl);
-          L.push(`${indent}E.${v}.Text = if E.${kv}Waiting then "[...]" else "[" .. E.${kv}Key .. "]"`);
+          // Property set of the cached string ref; no concat, no format.
+          L.push(`${indent}E.${v}.Text = E.${kv}DisplayText`);
         }
       } else if (src === 'playerName') {
-        L.push(`${indent}E.${v}.Text = game.Players.LocalPlayer.Name`);
+        // Handled once in init — nothing to do per frame.
       } else if (src === 'tabName') {
-        L.push(`${indent}E.${v}.Text = TabNames[ActiveTab] or ""`);
+        L.push(`${indent}if ActiveTab ~= E.${v}_Prev then`);
+        L.push(`${indent}    E.${v}.Text   = TabNames[ActiveTab] or ""`);
+        L.push(`${indent}    E.${v}_Prev   = ActiveTab`);
+        L.push(`${indent}end`);
       } else if (src === 'clock') {
-        L.push(`${indent}E.${v}.Text = os.date("%H:%M:%S")`);
+        // Only call os.date (allocates) when the whole-second boundary flips.
+        L.push(`${indent}do`);
+        L.push(`${indent}    local _sec: number = os.time()`);
+        L.push(`${indent}    if _sec ~= E.${v}_Prev then`);
+        L.push(`${indent}        E.${v}.Text = os.date("%H:%M:%S")`);
+        L.push(`${indent}        E.${v}_Prev = _sec`);
+        L.push(`${indent}    end`);
+        L.push(`${indent}end`);
       } else if (src === 'runtime') {
-        L.push(`${indent}if _T0 == 0 then _T0 = tick() end`);
-        L.push(`${indent}E.${v}.Text = string.format("%02d:%02d", math.floor((tick()-_T0)/60), math.floor(tick()-_T0)%60)`);
+        L.push(`${indent}do`);
+        L.push(`${indent}    if _T0 == 0 then _T0 = tick() end`);
+        L.push(`${indent}    local _sec: number = MathFloor(tick() - _T0)`);
+        L.push(`${indent}    if _sec ~= E.${v}_Prev then`);
+        L.push(`${indent}        E.${v}.Text = string.format("%02d:%02d", _sec // 60, _sec % 60)`);
+        L.push(`${indent}        E.${v}_Prev = _sec`);
+        L.push(`${indent}    end`);
+        L.push(`${indent}end`);
       } else if (src === 'custom' && (el.dynamicExpr || '').trim()) {
-        L.push(`${indent}E.${v}.Text = tostring(${el.dynamicExpr.trim()})`);
+        // tostring returns the same ref for string values (zero alloc) and only
+        // allocates for non-strings. Skip the property write when unchanged.
+        L.push(`${indent}do`);
+        L.push(`${indent}    local _val: string = tostring(${el.dynamicExpr.trim()})`);
+        L.push(`${indent}    if _val ~= E.${v}_Prev then`);
+        L.push(`${indent}        E.${v}.Text = _val`);
+        L.push(`${indent}        E.${v}_Prev = _val`);
+        L.push(`${indent}    end`);
+        L.push(`${indent}end`);
       }
     }
   };
@@ -1003,7 +1176,11 @@ function genLua() {
     // ── callback stubs (inside runtime do-block to stay under 200-local limit) ──
     for (const el of sorted.filter(e => UI_TYPES.has(e.type))) {
       const elAct = el.action || 'CustomFunction';
-      if (el.type === 'Keybind' && (elAct === 'ToggleUI' || elAct.startsWith('switchTab:'))) continue;
+      if (el.type === 'Keybind' && (
+            elAct === 'ToggleUI' ||
+            elAct.startsWith('switchTab:') ||
+            elAct.startsWith('toggleTarget:')
+          )) continue;
       if (el.type === 'Button'  && elAct.startsWith('switchTab:')) continue;
       const fnName = `On${vn(el)}${el.callback}`;
       let sig = '';
@@ -1103,21 +1280,27 @@ function genLua() {
       const kbAct        = el.action || 'CustomFunction';
       const isTogUI      = kbAct === 'ToggleUI';
       const isKbSwTab    = kbAct.startsWith('switchTab:');
+      const isToggleTgt  = kbAct.startsWith('toggleTarget:');
+      const tgtId        = isToggleTgt ? kbAct.slice('toggleTarget:'.length) : null;
+      const tgt          = tgtId ? sorted.find(e => e.id === tgtId) : null;
       const kbSwTabIdx   = isKbSwTab
         ? S.tabs.findIndex(t => t.id === kbAct.slice('switchTab:'.length)) + 1
         : 0;
-      // ToggleUI and switchTab keybinds fire from any tab; CustomFunction ones only on their tab
-      const tg = (multiTab && !el.shared && !isTogUI && !isKbSwTab) ? `ActiveTab == ${tabIdx(el)} and ` : '';
+      // ToggleUI, switchTab, and toggleTarget keybinds fire from any tab; CustomFunction ones only on their tab
+      const tg = (multiTab && !el.shared && !isTogUI && !isKbSwTab && !isToggleTgt) ? `ActiveTab == ${tabIdx(el)} and ` : '';
       const clickTg = (multiTab && !el.shared) ? `ActiveTab == ${tabIdx(el)} and ` : '';
       L.push(`        if E.${v}Waiting then`);
       L.push(`            if E.${v}WaitReady then`);
       L.push(`                local Pressed: {string} = getpressedkeys()`);
       L.push(`                if #Pressed > 0 then`);
-      L.push(`                    E.${v}Key       = Pressed[1]`);
-      L.push(`                    E.${v}Waiting   = false`);
-      L.push(`                    E.${v}WaitReady = false`);
+      L.push(`                    E.${v}Key         = Pressed[1]`);
+      L.push(`                    E.${v}Waiting     = false`);
+      L.push(`                    E.${v}WaitReady   = false`);
+      // Rebuild DisplayText once on capture — this is the only allocation site.
+      L.push(`                    E.${v}DisplayText = "[" .. Pressed[1] .. "]"`);
+      L.push(`                    E.${v}Text.Text   = E.${v}DisplayText`);
       // Key-capture fires CustomFunction once: flag, dispatch runs in PostLocal.
-      if (!isTogUI && !isKbSwTab) L.push(`                    E.${v}Fired     = true`);
+      if (!isTogUI && !isKbSwTab && !isToggleTgt) L.push(`                    E.${v}Fired       = true`);
       L.push(`                end`);
       L.push(`            elseif not LeftPressed then`);
       L.push(`                E.${v}WaitReady = true`);
@@ -1128,24 +1311,56 @@ function genLua() {
       L.push(`                local Size = E.${v}Background.Size`);
       L.push(`                if Mouse.X >= Pos.X and Mouse.X <= Pos.X + Size.X`);
       L.push(`                and Mouse.Y >= Pos.Y and Mouse.Y <= Pos.Y + Size.Y then`);
-      L.push(`                    E.${v}Waiting   = true`);
-      L.push(`                    E.${v}WaitReady = false`);
+      L.push(`                    E.${v}Waiting     = true`);
+      L.push(`                    E.${v}WaitReady   = false`);
+      // Switch to "[...]" placeholder — reuses an interned literal, no per-frame concat.
+      L.push(`                    E.${v}DisplayText = "[...]"`);
+      L.push(`                    E.${v}Text.Text   = E.${v}DisplayText`);
       L.push(`                end`);
       L.push(`            end`);
-      L.push(`            if ${tg}TableFind(Keys, E.${v}Key) and not TableFind(PrevKeys, E.${v}Key) then`);
-      if (isTogUI) {
-        // ToggleUI runs inline in PreLocal — it must affect render-visibility this frame.
-        L.push(`                UIVisible = not UIVisible`);
-        emitStaticVis(16);
-        if (needsSetTab) L.push(`                if UIVisible then SetTab(ActiveTab) end`);
-      } else if (isKbSwTab) {
-        // switchTab runs inline in PreLocal — must affect ActiveTab before render reads it.
-        L.push(`                SetTab(${kbSwTabIdx || 1})`);
-      } else {
-        // CustomFunction — flag for PostLocal dispatch.
-        L.push(`                E.${v}Fired = true`);
+      // Skip emitting the key-press dispatch guard entirely when a toggleTarget's target
+      // is dead — saves one TableFind fastcall per frame on a no-op keybind.
+      const toggleTgtValid = isToggleTgt && (
+        (tgt && tgt.type === 'Checkbox') ||
+        (tgt && tgt.type === 'Button' && tgt.toggleMode)
+      );
+      const emitDispatch = !isToggleTgt || toggleTgtValid;
+      if (emitDispatch) {
+        L.push(`            if ${tg}TableFind(Keys, E.${v}Key) and not TableFind(PrevKeys, E.${v}Key) then`);
+        if (isTogUI) {
+          // ToggleUI runs inline in PreLocal — it must affect render-visibility this frame.
+          L.push(`                UIVisible = not UIVisible`);
+          emitStaticVis(16);
+          if (needsSetTab) L.push(`                if UIVisible then SetTab(ActiveTab) end`);
+        } else if (isKbSwTab) {
+          // switchTab runs inline in PreLocal — must affect ActiveTab before render reads it.
+          L.push(`                SetTab(${kbSwTabIdx || 1})`);
+        } else if (isToggleTgt) {
+          // toggleTarget flips another widget's state inline so Render sees it this frame.
+          // Pure field writes — no allocation, no closure, no table build.
+          if (tgt.type === 'Checkbox') {
+            const tv = vn(tgt);
+            L.push(`                E.${tv}Checked = not E.${tv}Checked`);
+            if (tgt.exclusiveGroup) {
+              const peers = sorted.filter(pe =>
+                pe.type === 'Checkbox' && pe.id !== tgt.id && pe.exclusiveGroup === tgt.exclusiveGroup
+              );
+              if (peers.length) {
+                // Unrolled at codegen time — no runtime loop, no iterator alloc.
+                L.push(`                if E.${tv}Checked then`);
+                for (const peer of peers) L.push(`                    E.${vn(peer)}Checked = false`);
+                L.push(`                end`);
+              }
+            }
+          } else {
+            L.push(`                E.${vn(tgt)}Toggled = not E.${vn(tgt)}Toggled`);
+          }
+        } else {
+          // CustomFunction — flag for PostLocal dispatch.
+          L.push(`                E.${v}Fired = true`);
+        }
+        L.push(`            end`);
       }
-      L.push(`            end`);
       L.push(`        end`);
       L.push('');
     }
@@ -1164,10 +1379,6 @@ function genLua() {
         L.push(`                local Size = E.${v}Background.Size`);
         L.push(`                if Mouse.X >= Pos.X and Mouse.X <= Pos.X + Size.X`);
         L.push(`                and Mouse.Y >= Pos.Y and Mouse.Y <= Pos.Y + Size.Y then`);
-        L.push(`                    if not E.${v}Open then`);
-        L.push(`                        E.${v}Options   = ${el.dynamicOptions.trim()}`);
-        L.push(`                        E.${v}SlotCount = math.min(#E.${v}Options, ${slotCnt})`);
-        L.push(`                    end`);
         L.push(`                    E.${v}Open = not E.${v}Open`);
         L.push(`                end`);
         L.push(`            end`);
@@ -1178,7 +1389,7 @@ function genLua() {
         L.push(`                    local SlotY = BgPos.Y + BgSize.Y * _i`);
         L.push(`                    if Mouse.X >= BgPos.X and Mouse.X <= BgPos.X + BgSize.X`);
         L.push(`                    and Mouse.Y >= SlotY and Mouse.Y < SlotY + BgSize.Y then`);
-        L.push(`                        E.${v}Selected = E.${v}Options[_i]`);
+        L.push(`                        E.${v}Selected = tostring(E.${v}Options[_i] or "")`);
         L.push(`                        E.${v}Open     = false`);
         L.push(`                        E.${v}FiredIdx = _i`);
         L.push(`                        E.${v}Fired    = true`);
@@ -1186,6 +1397,13 @@ function genLua() {
         L.push(`                    end`);
         L.push(`                end`);
         L.push(`            end`);
+        L.push(`        end`);
+        // Live-refresh options every frame while the dropdown is open.
+        L.push(`        if ${tg}E.${v}Open then`);
+        L.push(`            local _opts = ${wrapDynOptsExpr(el.dynamicOptions)}`);
+        L.push(`            if type(_opts) ~= "table" then _opts = {} end`);
+        L.push(`            E.${v}Options   = _opts`);
+        L.push(`            E.${v}SlotCount = math.min(#_opts, ${slotCnt})`);
         L.push(`        end`);
       } else {
         L.push(`        if ${tg}LeftClicked then`);
@@ -1217,7 +1435,10 @@ function genLua() {
 
     for (const el of sorted.filter(e => e.type === 'Slider')) {
       const v    = vn(el);
-      const step = el.step && el.step > 1 ? el.step : null;
+      // Any positive step is honored — including sub-unit (0.1, 0.25, 0.5).
+      // When step is unset we leave Raw unrounded so the user can opt out of
+      // quantization entirely (e.g. for fine continuous inputs).
+      const step = el.step && el.step > 0 ? el.step : null;
       const tg   = (multiTab && !el.shared) ? `ActiveTab == ${tabIdx(el)} and ` : '';
       L.push(`        do`);
       L.push(`            local Pos  = E.${v}Track.Position`);
@@ -1231,7 +1452,7 @@ function genLua() {
         L.push(`                local Raw: number = ${el.minVal || 0} + T * (${el.maxVal || 100} - ${el.minVal || 0})`);
         L.push(`                E.${v}Value         = MathFloor(Raw / ${step} + 0.5) * ${step}`);
       } else {
-        L.push(`                E.${v}Value         = MathFloor(${el.minVal || 0} + T * (${el.maxVal || 100} - ${el.minVal || 0}))`);
+        L.push(`                E.${v}Value         = ${el.minVal || 0} + T * (${el.maxVal || 100} - ${el.minVal || 0})`);
       }
       if (!el.fireOnRelease) {
         L.push(`                E.${v}Fired         = true`);
@@ -1384,11 +1605,9 @@ function genLua() {
     }
     if (hasCB) L.push('');
 
-    for (const el of sorted.filter(e => e.type === 'Keybind')) {
-      const v = vn(el);
-      L.push(`        E.${v}Text.Text = if E.${v}Waiting then "[...]" else "[" .. E.${v}Key .. "]"`);
-    }
-    if (hasKB) L.push('');
+    // Keybind DisplayText is event-driven (updated at state transitions), so no
+    // per-frame Text mutation is required.  (Dynamic-text mirrors read the same
+    // cached DisplayText string ref.)
 
     for (const el of sorted.filter(e => e.type === 'Dropdown')) {
       const v       = vn(el);
@@ -1400,25 +1619,44 @@ function genLua() {
       const isDynDD = !!(el.dynamicOptions && el.dynamicOptions.trim());
       const slotCnt = isDynDD ? (el.maxOptions || 20) : N;
       if (isDynDD) {
+        // Hot path: indexes into the pre-built _OptBg/_OptTx ref arrays so no
+        // per-slot string keys are built at runtime. Labels only re-fit when
+        // the option string actually changes (cached in _OptPrev).
         L.push(`        do`);
-        L.push(`            local _BgPos  = E.${v}Background.Position`);
-        L.push(`            local _BgSize = E.${v}Background.Size`);
+        L.push(`            local _BgPos   = E.${v}Background.Position`);
+        L.push(`            local _BgSize  = E.${v}Background.Size`);
+        L.push(`            local _OptBg   = E.${v}_OptBg`);
+        L.push(`            local _OptTx   = E.${v}_OptTx`);
+        L.push(`            local _OptPrev = E.${v}_OptPrev`);
+        L.push(`            local _Options = E.${v}Options`);
+        L.push(`            local _Count   = E.${v}SlotCount`);
         L.push(`            E.${v}Text.Text  = E.${v}Selected`);
+        L.push(`            _FitText(E.${v}Text, ${Math.max(1, el.w - 28)})`);
         L.push(`            E.${v}Arrow.Text = if E.${v}Open then "\u25b2" else "\u25bc"`);
         L.push(`            for _i = 1, ${slotCnt} do`);
-        L.push(`                local _show: boolean = ${uiGate}${tabGate}E.${v}Open and _i <= E.${v}SlotCount`);
-        L.push(`                E["${v}OptionBackground" .. tostring(_i - 1)].Visible = _show`);
-        L.push(`                E["${v}OptionText"       .. tostring(_i - 1)].Visible = _show`);
+        L.push(`                local _bg = _OptBg[_i]`);
+        L.push(`                local _tx = _OptTx[_i]`);
+        L.push(`                local _show: boolean = ${uiGate}${tabGate}E.${v}Open and _i <= _Count`);
+        L.push(`                _bg.Visible = _show`);
+        L.push(`                _tx.Visible = _show`);
         L.push(`                if _show then`);
-        L.push(`                    E["${v}OptionBackground" .. tostring(_i - 1)].Position = Vector2.new(_BgPos.X, _BgPos.Y + _BgSize.Y * _i)`);
-        L.push(`                    E["${v}OptionBackground" .. tostring(_i - 1)].Size     = _BgSize`);
-        L.push(`                    E["${v}OptionText"       .. tostring(_i - 1)].Text     = E.${v}Options[_i] or ""`);
-        L.push(`                    E["${v}OptionText"       .. tostring(_i - 1)].Position = Vector2.new(_BgPos.X + 6, _BgPos.Y + _BgSize.Y * _i + 4)`);
+        L.push(`                    _bg.Position = Vector2.new(_BgPos.X, _BgPos.Y + _BgSize.Y * _i)`);
+        L.push(`                    _bg.Size     = _BgSize`);
+        L.push(`                    _tx.Position = Vector2.new(_BgPos.X + 6, _BgPos.Y + _BgSize.Y * _i + 4)`);
+        // Only rebuild the text + re-fit when the source option actually changed.
+        L.push(`                    local _opt = _Options[_i]`);
+        L.push(`                    local _str = if type(_opt) == "string" then _opt else tostring(_opt or "")`);
+        L.push(`                    if _str ~= _OptPrev[_i] then`);
+        L.push(`                        _tx.Text     = _str`);
+        L.push(`                        _FitText(_tx, ${Math.max(1, el.w - 16)})`);
+        L.push(`                        _OptPrev[_i] = _str`);
+        L.push(`                    end`);
         L.push(`                end`);
         L.push(`            end`);
         L.push(`        end`);
       } else {
         L.push(`        E.${v}Text.Text  = E.${v}Selected`);
+        L.push(`        _FitText(E.${v}Text, ${Math.max(1, el.w - 28)})`);
         L.push(`        E.${v}Arrow.Text = if E.${v}Open then "\u25b2" else "\u25bc"`);
         for (let i = 0; i < N; i++) {
           L.push(`        E.${v}OptionBackground${i}.Visible = ${uiGate}${tabGate}E.${v}Open`);
@@ -1437,7 +1675,13 @@ function genLua() {
       L.push(`            local FW: number = E.${v}Track.Size.X * T`);
       L.push(`            E.${v}Fill.Size     = Vector2.new(FW, E.${v}Track.Size.Y)`);
       L.push(`            E.${v}Knob.Position = Vector2.new(E.${v}Track.Position.X + FW - 5, E.${v}Track.Position.Y - 2)`);
-      L.push(`            E.${v}Label.Text    = tostring(E.${v}Value) .. "${el.suffix || ''}"`);
+      // Only rebuild the label string when the Value actually changed — saves
+      // _FmtNum + string concat + _FitText per frame while the user isn't dragging.
+      L.push(`            if E.${v}Value ~= E.${v}_LabelPrev then`);
+      L.push(`                E.${v}Label.Text = _FmtNum(E.${v}Value) .. "${el.suffix || ''}"`);
+      L.push(`                _FitText(E.${v}Label, ${Math.max(1, el.w)})`);
+      L.push(`                E.${v}_LabelPrev = E.${v}Value`);
+      L.push(`            end`);
       L.push(`        end`);
     }
     if (hasSL) L.push('');
@@ -1450,26 +1694,35 @@ function genLua() {
         ? S.tabs.findIndex(t => t.id === btAct.slice('switchTab:'.length)) + 1
         : 0;
       if (isSwitchTab) {
-        const actBg   = el.tabActiveColor   || el.hoverColor || el.color;
-        const actText = el.tabActiveTextColor || el.textColor || '#ffffff';
+        // All four color states resolved to cached module-scope Color3 locals —
+        // no Color3.fromRGB per frame regardless of which branch is taken.
+        const actBgC    = hotColor(el.tabActiveColor   || el.hoverColor || el.color);
+        const actTextC  = hotColor(el.tabActiveTextColor || el.textColor || '#ffffff');
+        const hoverBgC  = hotColor(el.hoverColor || el.color);
+        const baseBgC   = hotColor(el.color);
+        const baseTextC = hotColor(el.textColor || '#ffffff');
         L.push(`        do`);
         L.push(`            local Pos  = E.${v}Background.Position`);
         L.push(`            local Size = E.${v}Background.Size`);
         L.push(`            local Over:  boolean = Mouse.X >= Pos.X and Mouse.X <= Pos.X + Size.X`);
         L.push(`                              and Mouse.Y >= Pos.Y and Mouse.Y <= Pos.Y + Size.Y`);
         L.push(`            local IsAct: boolean = ActiveTab == ${switchTabIdx}`);
-        L.push(`            E.${v}Background.Color = if IsAct then ${c3(actBg)} elseif Over then ${c3(el.hoverColor || el.color)} else ${c3(el.color)}`);
-        L.push(`            E.${v}Text.Color       = if IsAct then ${c3(actText)} else ${c3(el.textColor || '#ffffff')}`);
+        L.push(`            E.${v}Background.Color = if IsAct then ${actBgC} elseif Over then ${hoverBgC} else ${baseBgC}`);
+        L.push(`            E.${v}Text.Color       = if IsAct then ${actTextC} else ${baseTextC}`);
         L.push(`        end`);
       } else if (el.toggleMode) {
-        L.push(`        E.${v}Background.Color = if E.${v}Toggled then ${c3(el.activeColor || '#2a5ec4')} else ${c3(el.color)}`);
+        const activeC = hotColor(el.activeColor || '#2a5ec4');
+        const baseC   = hotColor(el.color);
+        L.push(`        E.${v}Background.Color = if E.${v}Toggled then ${activeC} else ${baseC}`);
       } else {
+        const hoverC = hotColor(el.hoverColor || el.color);
+        const baseC  = hotColor(el.color);
         L.push(`        do`);
         L.push(`            local Pos  = E.${v}Background.Position`);
         L.push(`            local Size = E.${v}Background.Size`);
         L.push(`            local Over: boolean = Mouse.X >= Pos.X and Mouse.X <= Pos.X + Size.X`);
         L.push(`                              and Mouse.Y >= Pos.Y and Mouse.Y <= Pos.Y + Size.Y`);
-        L.push(`            E.${v}Background.Color = if Over then ${c3(el.hoverColor || el.color)} else ${c3(el.color)}`);
+        L.push(`            E.${v}Background.Color = if Over then ${hoverC} else ${baseC}`);
         L.push(`        end`);
       }
     }
@@ -1840,7 +2093,41 @@ function genLuaImmediate() {
   L.push('local DI_Text       = DrawingImmediate.Text');
   L.push('local DI_OText      = DrawingImmediate.OutlinedText');
   L.push('local DI_Image      = DrawingImmediate.Image');
+  L.push('local DI_GetBounds  = DrawingImmediate.GetTextBounds');
   L.push('');
+  L.push('-- Truncate text so its rendered width fits maxW pixels.');
+  L.push('-- Uses DrawingImmediate.GetTextBounds when font is known, falls back to');
+  L.push('-- a cheap character-width estimate when the default font is used (nil).');
+  L.push('-- Binary search → O(log n) GetTextBounds calls in the overflow path.');
+  L.push('local function DI_FitText(text: string, size: number, font: string?, maxW: number): string');
+  L.push('    if font then');
+  L.push('        if DI_GetBounds(font, size, text).X <= maxW then return text end');
+  L.push('        local lo: number, hi: number = 0, #text');
+  L.push('        while lo < hi do');
+  L.push('            local mid: number = (lo + hi + 1) // 2');
+  L.push('            if DI_GetBounds(font, size, string.sub(text, 1, mid) .. "...").X <= maxW then');
+  L.push('                lo = mid');
+  L.push('            else');
+  L.push('                hi = mid - 1');
+  L.push('            end');
+  L.push('        end');
+  L.push('        return if lo == 0 then "..." else string.sub(text, 1, lo) .. "..."');
+  L.push('    else');
+  L.push('        local maxChars: number = math.floor(maxW / (size * 0.55))');
+  L.push('        if #text <= maxChars then return text end');
+  L.push('        return string.sub(text, 1, math.max(1, maxChars - 3)) .. "..."');
+  L.push('    end');
+  L.push('end');
+  L.push('');
+  if (hasSL) {
+    L.push('-- Format a slider value for display: integers render bare, floats use %g to');
+    L.push('-- trim trailing zeros (at most 6 significant digits).');
+    L.push('local function _FmtNum(v: number): string');
+    L.push('    if v == MathFloor(v) then return tostring(MathFloor(v)) end');
+    L.push('    return string.format("%g", v)');
+    L.push('end');
+    L.push('');
+  }
 
   // Center UI on viewport: runtime offset applied to every cached position
   if (centerOn) {
@@ -1873,9 +2160,22 @@ function genLuaImmediate() {
           L.push(`E.${v}Size = Vector2.new(${Math.round(el.w)}, ${Math.round(el.h)})`);
         }
         break;
-      case 'Text':
-        if (el.dynamicSource && el.dynamicSource !== '') L.push(`E.${v}Text = ""`);
+      case 'Text': {
+        const dsrc = el.dynamicSource || '';
+        if (dsrc !== '') {
+          L.push(`E.${v}Text = ""`);
+          // Prev-value cache so PreLocal can skip rebuilds when the value
+          // hasn't changed. Sentinels chosen so the first tick always writes.
+          if (dsrc === 'tabName' || dsrc === 'clock' || dsrc === 'runtime') {
+            L.push(`E.${v}_Prev = -1`);
+          } else if (dsrc === 'custom' && (el.dynamicExpr || '').trim()) {
+            L.push(`E.${v}_Prev = ""`);
+          }
+          // keybind: source reads E.<kv>DisplayText directly — no prev cache.
+          // playerName is written below once at init.
+        }
         break;
+      }
       case 'Checkbox':
         L.push(`E.${v}Checked = ${!!el.defaultChecked}`);
         break;
@@ -1906,6 +2206,8 @@ function genLuaImmediate() {
         L.push(`E.${v}LabelText = "${el.curVal || 0}${el.suffix || ''}"`);
         L.push(`E.${v}FillW     = 0`);  // pre-computed in PreLocal, consumed by Render
         L.push(`E.${v}Fired     = false`);
+        // Previous Value cached so per-frame PreLocal only rebuilds LabelText on change.
+        L.push(`E.${v}_LabelPrev = ${el.curVal || 0}`);
         break;
       case 'Button': {
         const btAct = el.action || 'CustomFunction';
@@ -1954,11 +2256,23 @@ function genLuaImmediate() {
   if (multiTab) L.push('    SetTab(1)');
   for (const el of sorted.filter(e => e.type === 'Slider')) {
     const v = vn(el);
-    L.push(`    E.${v}LabelText = tostring(E.${v}Value) .. "${el.suffix || ''}"`);
+    L.push(`    E.${v}LabelText = _FmtNum(E.${v}Value) .. "${el.suffix || ''}"`);
   }
-  for (const el of sorted.filter(e => e.type === 'Keybind')) {
-    const v = vn(el);
-    L.push(`    E.${v}DisplayText = "[" .. E.${v}Key .. "]"`);
+  // Keybind DisplayText is already populated with "[<defaultKey>]" at the per-element
+  // init step above — no additional concat needed here.
+  //
+  // Dynamic-text session-constants: playerName is read once here. Per-frame
+  // PreLocal skips these elements entirely.
+  {
+    let wrotePlayerName = false;
+    for (const el of dynTextEls) {
+      if ((el.dynamicSource || '') !== 'playerName') continue;
+      if (!wrotePlayerName) {
+        L.push(`    local _PlayerName: string = game.Players.LocalPlayer.Name`);
+        wrotePlayerName = true;
+      }
+      L.push(`    E.${vn(el)}Text = _PlayerName`);
+    }
   }
   L.push('end');
   L.push('');
@@ -1979,7 +2293,8 @@ function genLuaImmediate() {
       const kbAct   = el.action || 'CustomFunction';
       const isTogUI = el.type === 'Keybind' && kbAct === 'ToggleUI';
       const isSwTab = (el.type === 'Keybind' || el.type === 'Button') && kbAct.startsWith('switchTab:');
-      if (isTogUI || isSwTab) continue;
+      const isTgtKB = el.type === 'Keybind' && kbAct.startsWith('toggleTarget:');
+      if (isTogUI || isSwTab || isTgtKB) continue;
       const bodyInPost = el.type === 'Checkbox' || (el.type === 'Button' && el.toggleMode);
       let sig = '';
       if (el.type === 'Checkbox')  sig = 'state: boolean';
@@ -2050,18 +2365,23 @@ function genLuaImmediate() {
       const kbAct    = el.action || 'CustomFunction';
       const isTogUI  = kbAct === 'ToggleUI';
       const isKbSwTab = kbAct.startsWith('switchTab:');
+      const isToggleTgt = kbAct.startsWith('toggleTarget:');
+      const tgtId    = isToggleTgt ? kbAct.slice('toggleTarget:'.length) : null;
+      const tgt      = tgtId ? sorted.find(e => e.id === tgtId) : null;
       const kbSwTabIdx = isKbSwTab ? S.tabs.findIndex(t => t.id === kbAct.slice('switchTab:'.length)) + 1 : 0;
-      const tg       = (multiTab && !el.shared && !isTogUI && !isKbSwTab) ? `ActiveTab == ${tabIdx(el)} and ` : '';
+      const tg       = (multiTab && !el.shared && !isTogUI && !isKbSwTab && !isToggleTgt) ? `ActiveTab == ${tabIdx(el)} and ` : '';
       const clickTg  = (multiTab && !el.shared) ? `ActiveTab == ${tabIdx(el)} and ` : '';
       const posExpr  = hitPosExpr(el);
       L.push(`        if E.${v}Waiting then`);
       L.push(`            if E.${v}WaitReady then`);
       L.push(`                local Pressed: {string} = getpressedkeys()`);
       L.push(`                if #Pressed > 0 then`);
-      L.push(`                    E.${v}Key       = Pressed[1]`);
-      L.push(`                    E.${v}Waiting   = false`);
-      L.push(`                    E.${v}WaitReady = false`);
-      if (!isTogUI && !isKbSwTab) L.push(`                    E.${v}Fired     = true`);
+      L.push(`                    E.${v}Key         = Pressed[1]`);
+      L.push(`                    E.${v}Waiting     = false`);
+      L.push(`                    E.${v}WaitReady   = false`);
+      // Rebuild DisplayText once on capture — the only allocation site.
+      L.push(`                    E.${v}DisplayText = "[" .. Pressed[1] .. "]"`);
+      if (!isTogUI && !isKbSwTab && !isToggleTgt) L.push(`                    E.${v}Fired       = true`);
       L.push(`                end`);
       L.push(`            elseif not LeftPressed then`);
       L.push(`                E.${v}WaitReady = true`);
@@ -2071,22 +2391,53 @@ function genLuaImmediate() {
       L.push(`                local _Pos = ${posExpr}`);
       L.push(`                if Mouse.X >= _Pos.X and Mouse.X <= _Pos.X + ${el.w}`);
       L.push(`                and Mouse.Y >= _Pos.Y and Mouse.Y <= _Pos.Y + ${el.h} then`);
-      L.push(`                    E.${v}Waiting   = true`);
-      L.push(`                    E.${v}WaitReady = false`);
+      L.push(`                    E.${v}Waiting     = true`);
+      L.push(`                    E.${v}WaitReady   = false`);
+      // Swap to placeholder literal — interned, zero allocation.
+      L.push(`                    E.${v}DisplayText = "[...]"`);
       L.push(`                end`);
       L.push(`            end`);
-      L.push(`            if ${tg}TableFind(Keys, E.${v}Key) and not TableFind(PrevKeys, E.${v}Key) then`);
-      if (isTogUI) {
-        L.push(`                UIVisible = not UIVisible`);
-      } else if (isKbSwTab) {
-        L.push(`                SetTab(${kbSwTabIdx || 1})`);
-      } else {
-        L.push(`                E.${v}Fired = true`);
+      // Skip the dispatch guard entirely when a toggleTarget's target is dead —
+      // avoids one TableFind fastcall per frame for a no-op keybind.
+      const toggleTgtValid = isToggleTgt && (
+        (tgt && tgt.type === 'Checkbox') ||
+        (tgt && tgt.type === 'Button' && tgt.toggleMode)
+      );
+      const emitDispatch = !isToggleTgt || toggleTgtValid;
+      if (emitDispatch) {
+        L.push(`            if ${tg}TableFind(Keys, E.${v}Key) and not TableFind(PrevKeys, E.${v}Key) then`);
+        if (isTogUI) {
+          L.push(`                UIVisible = not UIVisible`);
+        } else if (isKbSwTab) {
+          L.push(`                SetTab(${kbSwTabIdx || 1})`);
+        } else if (isToggleTgt) {
+          // toggleTarget flips another widget's state inline so Render sees it this frame.
+          // Pure field writes — no allocation, no closure, no table build.
+          if (tgt.type === 'Checkbox') {
+            const tv = vn(tgt);
+            L.push(`                E.${tv}Checked = not E.${tv}Checked`);
+            if (tgt.exclusiveGroup) {
+              const peers = sorted.filter(pe =>
+                pe.type === 'Checkbox' && pe.id !== tgt.id && pe.exclusiveGroup === tgt.exclusiveGroup
+              );
+              if (peers.length) {
+                // Unrolled at codegen time — no runtime loop, no iterator alloc.
+                L.push(`                if E.${tv}Checked then`);
+                for (const peer of peers) L.push(`                    E.${vn(peer)}Checked = false`);
+                L.push(`                end`);
+              }
+            }
+          } else {
+            L.push(`                E.${vn(tgt)}Toggled = not E.${vn(tgt)}Toggled`);
+          }
+        } else {
+          L.push(`                E.${v}Fired = true`);
+        }
+        L.push(`            end`);
       }
-      L.push(`            end`);
       L.push(`        end`);
-      // Precompute display text for Render
-      L.push(`        E.${v}DisplayText = if E.${v}Waiting then "[...]" else "[" .. E.${v}Key .. "]"`);
+      // DisplayText is event-driven (updated only at the two state-transition
+      // sites above), so no per-frame mutation is needed here.
       L.push('');
     }
 
@@ -2103,12 +2454,6 @@ function genLuaImmediate() {
       L.push(`                local _BgPos = ${posExpr}`);
       L.push(`                if Mouse.X >= _BgPos.X and Mouse.X <= _BgPos.X + ${el.w}`);
       L.push(`                and Mouse.Y >= _BgPos.Y and Mouse.Y <= _BgPos.Y + ${el.h} then`);
-      if (isDynDD) {
-        L.push(`                    if not E.${v}Open then`);
-        L.push(`                        E.${v}Options   = ${el.dynamicOptions.trim()}`);
-        L.push(`                        E.${v}SlotCount = math.min(#E.${v}Options, ${el.maxOptions || 20})`);
-        L.push(`                    end`);
-      }
       L.push(`                    E.${v}Open = not E.${v}Open`);
       L.push(`                end`);
       L.push(`            end`);
@@ -2119,7 +2464,11 @@ function genLuaImmediate() {
       L.push(`                    local _SlotY: number = _BgPos.Y + ${el.h} * _i`);
       L.push(`                    if Mouse.X >= _BgPos.X and Mouse.X <= _BgPos.X + ${el.w}`);
       L.push(`                    and Mouse.Y >= _SlotY and Mouse.Y < _SlotY + ${el.h} then`);
-      L.push(`                        E.${v}Selected = E.${v}Options[_i]`);
+      if (isDynDD) {
+        L.push(`                        E.${v}Selected = tostring(E.${v}Options[_i] or "")`);
+      } else {
+        L.push(`                        E.${v}Selected = E.${v}Options[_i]`);
+      }
       L.push(`                        E.${v}Open     = false`);
       L.push(`                        E.${v}FiredIdx = _i`);
       L.push(`                        E.${v}Fired    = true`);
@@ -2128,6 +2477,15 @@ function genLuaImmediate() {
       L.push(`                end`);
       L.push(`            end`);
       L.push(`        end`);
+      if (isDynDD) {
+        // Live-refresh options every frame while the dropdown is open.
+        L.push(`        if ${tg}E.${v}Open then`);
+        L.push(`            local _opts = ${wrapDynOptsExpr(el.dynamicOptions)}`);
+        L.push(`            if type(_opts) ~= "table" then _opts = {} end`);
+        L.push(`            E.${v}Options   = _opts`);
+        L.push(`            E.${v}SlotCount = math.min(#_opts, ${el.maxOptions || 20})`);
+        L.push(`        end`);
+      }
       L.push('');
     }
 
@@ -2135,6 +2493,13 @@ function genLuaImmediate() {
     for (const el of sorted.filter(e => e.type === 'Slider')) {
       const v       = vn(el);
       const b       = bounds(el);
+      const step    = el.step && el.step > 0 ? el.step : null;
+      const range   = (el.maxVal || 100) - (el.minVal || 0);
+      // Compute the quantised/raw slider value — shared by the fire-on-release
+      // and live branches below.
+      const valExpr = step
+        ? `MathFloor((${el.minVal || 0} + _T * ${range}) / ${step} + 0.5) * ${step}`
+        : `${el.minVal || 0} + _T * ${range}`;
       const tg      = (multiTab && !el.shared) ? `ActiveTab == ${tabIdx(el)}` : '';
       const posExpr = isDragChild(el)
         ? (() => { const par = dragParent(el); const pb = bounds(par); return `E.${vn(par)}Pos + Vector2.new(${Math.round(b.x - pb.x)}, ${Math.round(b.y - pb.y)})`; })()
@@ -2153,7 +2518,7 @@ function genLuaImmediate() {
         L.push(`            elseif ${activeGuard} then`);
         L.push(`                E.${v}Dragging = true`);
         L.push(`                local _T: number = MathClamp((Mouse.X - _TkPos.X) / ${el.w}, 0, 1)`);
-        L.push(`                E.${v}Value    = MathFloor(${el.minVal || 0} + _T * ${(el.maxVal || 100) - (el.minVal || 0)})`);
+        L.push(`                E.${v}Value    = ${valExpr}`);
         L.push(`            end`);
       } else {
         L.push(`            if not LeftPressed then`);
@@ -2161,12 +2526,16 @@ function genLuaImmediate() {
         L.push(`            elseif ${activeGuard} then`);
         L.push(`                E.${v}Dragging = true`);
         L.push(`                local _T: number = MathClamp((Mouse.X - _TkPos.X) / ${el.w}, 0, 1)`);
-        L.push(`                E.${v}Value    = MathFloor(${el.minVal || 0} + _T * ${(el.maxVal || 100) - (el.minVal || 0)})`);
+        L.push(`                E.${v}Value    = ${valExpr}`);
         L.push(`                E.${v}Fired    = true`);
         L.push(`            end`);
       }
-      // Precompute label text
-      L.push(`            E.${v}LabelText = tostring(E.${v}Value) .. "${el.suffix || ''}"`);
+      // Precompute label text — only rebuild on Value change to avoid
+      // per-frame _FmtNum + string concat while the slider is idle.
+      L.push(`            if E.${v}Value ~= E.${v}_LabelPrev then`);
+      L.push(`                E.${v}LabelText  = _FmtNum(E.${v}Value) .. "${el.suffix || ''}"`);
+      L.push(`                E.${v}_LabelPrev = E.${v}Value`);
+      L.push(`            end`);
       L.push(`        end`);
       L.push('');
     }
@@ -2266,7 +2635,10 @@ function genLuaImmediate() {
       L.push('');
     }
 
-    // Dynamic text
+    // Dynamic text — all sources cache into E.<v>Text so Render is pure read.
+    // Every branch is guarded so the string isn't re-built when the underlying
+    // value is unchanged. playerName is session-constant and pre-populated in
+    // the init block, so it never appears here.
     if (hasDynText) {
       L.push('');
       for (const el of dynTextEls) {
@@ -2275,15 +2647,41 @@ function genLuaImmediate() {
         if (src.startsWith('keybind:')) {
           const kbId  = src.slice('keybind:'.length);
           const kbEl  = sorted.find(e => e.type === 'Keybind' && e.id === kbId);
-          if (kbEl) L.push(`        E.${v}Text = "[" .. E.${vn(kbEl)}Key .. "]"`);
+          // Reuse the Keybind's cached DisplayText string ref — no per-frame concat.
+          if (kbEl) L.push(`        E.${v}Text = E.${vn(kbEl)}DisplayText`);
         } else if (src === 'playerName') {
-          L.push(`        E.${v}Text = game.Players.LocalPlayer.Name`);
+          // Written once at init; skip here.
         } else if (src === 'tabName') {
-          L.push(`        E.${v}Text = TabNames[ActiveTab] or ""`);
+          L.push(`        if ActiveTab ~= E.${v}_Prev then`);
+          L.push(`            E.${v}Text  = TabNames[ActiveTab] or ""`);
+          L.push(`            E.${v}_Prev = ActiveTab`);
+          L.push(`        end`);
+        } else if (src === 'clock') {
+          L.push(`        do`);
+          L.push(`            local _sec: number = os.time()`);
+          L.push(`            if _sec ~= E.${v}_Prev then`);
+          L.push(`                E.${v}Text  = os.date("%H:%M:%S")`);
+          L.push(`                E.${v}_Prev = _sec`);
+          L.push(`            end`);
+          L.push(`        end`);
+        } else if (src === 'runtime') {
+          L.push(`        do`);
+          L.push(`            if _T0 == 0 then _T0 = tick() end`);
+          L.push(`            local _sec: number = MathFloor(tick() - _T0)`);
+          L.push(`            if _sec ~= E.${v}_Prev then`);
+          L.push(`                E.${v}Text  = string.format("%02d:%02d", _sec // 60, _sec % 60)`);
+          L.push(`                E.${v}_Prev = _sec`);
+          L.push(`            end`);
+          L.push(`        end`);
         } else if (src === 'custom' && (el.dynamicExpr || '').trim()) {
-          L.push(`        E.${v}Text = tostring(${el.dynamicExpr.trim()})`);
+          L.push(`        do`);
+          L.push(`            local _val: string = tostring(${el.dynamicExpr.trim()})`);
+          L.push(`            if _val ~= E.${v}_Prev then`);
+          L.push(`                E.${v}Text  = _val`);
+          L.push(`                E.${v}_Prev = _val`);
+          L.push(`            end`);
+          L.push(`        end`);
         }
-        // clock and runtime are safe to compute inline in Render — skip here
       }
     }
 
@@ -2397,6 +2795,11 @@ function genLuaImmediate() {
       const fMap = { 0: 'nil', 1: '"Gotham"', 2: '"JetBrains Mono"', 3: '"Arial"', 4: '"SourceSans"' };
       const f = fMap[el.font] || 'nil';
       return f === 'nil' ? '' : `, ${f}`;
+    };
+    // Raw font name (or 'nil') for DI_FitText, which needs the naked expression.
+    const fontName = (el) => {
+      const fMap = { 0: 'nil', 1: '"Gotham"', 2: '"JetBrains Mono"', 3: '"Arial"', 4: '"SourceSans"' };
+      return fMap[el.font] || 'nil';
     };
 
     // Rounded filled-rectangle emulator.
@@ -2521,14 +2924,10 @@ function genLuaImmediate() {
           const rp    = renderPos(el);
           const pExpr = rp.isLocal ? (() => { const lv = `_p${v}`; L.push(`${ind}local ${lv}: Vector2 = ${rp.expr}`); return lv; })() : rp.expr;
           const src   = el.dynamicSource || '';
+          // All dynamic sources cache into E.<v>Text in PreLocal (with change
+          // guards). Render just reads the cached ref — no allocations.
           let textExpr;
-          if (src === 'clock') {
-            textExpr = `os.date("%H:%M:%S")`;
-          } else if (src === 'runtime') {
-            textExpr = `string.format("%02d:%02d", math.floor((tick()-_T0)/60), math.floor(tick()-_T0)%60)`;
-            // _T0 lazy init goes in a local before this draw call — emit guard
-            L.push(`${ind}if _T0 == 0 then _T0 = tick() end`);
-          } else if (src && src !== '') {
+          if (src && src !== '') {
             textExpr = `E.${v}Text`;
           } else {
             textExpr = `"${(el.text || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
@@ -2584,17 +2983,21 @@ function genLuaImmediate() {
           const dty     = Math.round(el.h / 2 - (el.textSize || 16) / 2);
           const atx     = Math.round(el.w - 16);
           const fn3     = fontArg({ font: el.font });
+          const fnN     = fontName({ font: el.font });
+          const tsz     = el.textSize || 16;
+          const maxHdrW = Math.max(1, el.w - 28);
+          const maxOptW = Math.max(1, el.w - 16);
           const lv      = `_dd${v}`;
           L.push(`${ind}local ${lv}: Vector2 = ${pExpr}`);
           emitFilledRect(ind, lv, el.w, el.h, cBg, el.opacity ?? 1, el.rounding || 0, v + 'Dd');
-          L.push(`${ind}DI_OText(${lv} + Vector2.new(${dtx}, ${dty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, E.${v}Selected, false${fn3})`);
-          L.push(`${ind}DI_OText(${lv} + Vector2.new(${atx}, ${dty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, "v", false${fn3})`);
+          L.push(`${ind}DI_OText(${lv} + Vector2.new(${dtx}, ${dty}), ${tsz}, ${cTx}, ${fn(el.opacity ?? 1)}, DI_FitText(E.${v}Selected, ${tsz}, ${fnN}, ${maxHdrW}), false${fn3})`);
+          L.push(`${ind}DI_OText(${lv} + Vector2.new(${atx}, ${dty}), ${tsz}, ${cTx}, ${fn(el.opacity ?? 1)}, "v", false${fn3})`);
           L.push(`${ind}if E.${v}Open then`);
           const loopMax = isDynDD ? `E.${v}SlotCount` : `#E.${v}Options`;
           L.push(`${ind}    for _i = 1, ${loopMax} do`);
           L.push(`${ind}        local _oy: number = ${lv}.Y + ${el.h} * _i`);
           L.push(`${ind}        DI_FRect(Vector2.new(${lv}.X, _oy), ${sBg}, ${cBg}, ${fn(el.opacity ?? 1)})`);
-          L.push(`${ind}        DI_OText(Vector2.new(${lv}.X + ${dtx}, _oy + ${dty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, E.${v}Options[_i], false${fn3})`);
+          L.push(`${ind}        DI_OText(Vector2.new(${lv}.X + ${dtx}, _oy + ${dty}), ${tsz}, ${cTx}, ${fn(el.opacity ?? 1)}, DI_FitText(${isDynDD ? `tostring(E.${v}Options[_i] or "")` : `E.${v}Options[_i]`}, ${tsz}, ${fnN}, ${maxOptW}), false${fn3})`);
           L.push(`${ind}    end`);
           L.push(`${ind}end`);
           break;
@@ -2615,7 +3018,7 @@ function genLuaImmediate() {
           emitFilledRect(ind, lv, el.w, el.h, cTk, el.opacity ?? 1, el.rounding || 0, v + 'Sl');
           L.push(`${ind}DI_FRect(${lv}, Vector2.new(_FW, ${el.h}), ${cKn}, ${fn(el.opacity ?? 1)})`);
           L.push(`${ind}DI_FRect(Vector2.new(${lv}.X + _FW - 5, ${lv}.Y - 2), ${sKn}, ${cKn}, ${fn(el.opacity ?? 1)})`);
-          L.push(`${ind}DI_OText(${lv} + Vector2.new(${lbx}, -16), 14, ${cLb}, ${fn(el.opacity ?? 1)}, E.${v}LabelText, true${fn3})`);
+          L.push(`${ind}DI_OText(${lv} + Vector2.new(${lbx}, -16), 14, ${cLb}, ${fn(el.opacity ?? 1)}, DI_FitText(E.${v}LabelText, 14, ${fontName({ font: el.font })}, ${Math.max(1, el.w)}), true${fn3})`);
           break;
         }
         case 'Button': {
@@ -2629,7 +3032,7 @@ function genLuaImmediate() {
           // BgColor is pre-computed in PreLocal as E.${v}BgColor — Render is pure draw.
           L.push(`${ind}local ${lv}: Vector2 = ${pExpr}`);
           emitFilledRect(ind, lv, el.w, el.h, `E.${v}BgColor`, el.opacity ?? 1, el.rounding || 0, v + 'Bt');
-          L.push(`${ind}DI_OText(${lv} + Vector2.new(${tx}, ${ty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, "${(el.label || 'Button').replace(/"/g, '\\"')}", true${fn3})`);
+          L.push(`${ind}DI_OText(${lv} + Vector2.new(${tx}, ${ty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, DI_FitText("${(el.label || 'Button').replace(/"/g, '\\"')}", ${el.textSize || 16}, ${fontName({ font: el.font })}, ${Math.max(1, el.w - 8)}), true${fn3})`);
           break;
         }
       }

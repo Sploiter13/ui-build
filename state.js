@@ -79,6 +79,7 @@ let clip     = [];     // Clipboard (deep-copied elements)
 let snaps    = [];     // Snap guide lines for current frame (at most 1 x + 1 y)
 let ctxEl    = null;   // Element targeted by right-click context menu
 let _lastHit = null;   // ID of last hit-tested element (for click-cycling)
+let _lastClickPos = null; // World-space position of last hit-test (gates cycling to same-spot clicks)
 
 // Pan state
 let _panX      = 0;

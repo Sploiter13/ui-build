@@ -61,7 +61,7 @@ function hitTest(pos) {
       }
     }
   }
-  if (!hits.length) { _lastHit = null; return null; }
+  if (!hits.length) { _lastHit = null; _lastClickPos = null; return null; }
 
   hits.sort((a, b) => {
     const dz = (b.zIndex || 0) - (a.zIndex || 0);
@@ -71,16 +71,29 @@ function hitTest(pos) {
     return 0;
   });
 
-  if (_lastHit) {
-    const idx = hits.findIndex(e => e.id === _lastHit);
+  // Locked elements are transparent to canvas clicks — pass-through to what's under them.
+  // (Select via the Layers panel row if you need property access on a locked element.)
+  const candidates = hits.filter(e => !e.locked);
+  if (!candidates.length) { _lastHit = null; _lastClickPos = null; return null; }
+
+  // Cycle only when the new click is essentially on the same spot as the previous one.
+  const CYCLE_PX = 4 / S.zoom;
+  const samePos = _lastClickPos &&
+                  Math.abs(pos.x - _lastClickPos.x) <= CYCLE_PX &&
+                  Math.abs(pos.y - _lastClickPos.y) <= CYCLE_PX;
+
+  if (samePos && _lastHit) {
+    const idx = candidates.findIndex(e => e.id === _lastHit);
     if (idx >= 0) {
-      const next = hits[(idx + 1) % hits.length];
+      const next = candidates[(idx + 1) % candidates.length];
       _lastHit = next.id;
+      _lastClickPos = pos;
       return next;
     }
   }
-  _lastHit = hits[0].id;
-  return hits[0];
+  _lastHit = candidates[0].id;
+  _lastClickPos = pos;
+  return candidates[0];
 }
 
 /* ═══════════════════════════════════════════
@@ -246,24 +259,28 @@ CV.addEventListener('mousedown', e => {
     return;
   }
 
-  // Check resize handles first
+  // Check resize handles first.  If the pointer is on ANY selected element's
+  // handle, start a multi-element resize using per-element snapshots.
   for (const id of S.sel) {
     const el = S.els.find(e => e.id === id);
     if (!el || el.locked) continue;
     const h = handleAt(pos, el);
     if (h) {
-      const b = bounds(el);
-      drg = {
-        type: 'resize',
-        start: pos,
-        handle: h,
-        s0: {
-          x: el.x, y: el.y,
-          w: el.w || b.w, h: el.h || b.h,
-          radius: el.radius,
-          x1: el.x1, y1: el.y1, x2: el.x2, y2: el.y2,
-        },
-      };
+      const s0s = {};
+      // The element whose handle was grabbed is the "primary" — snap uses it.
+      const primaryId = el.id;
+      for (const sid of S.sel) {
+        const e2 = S.els.find(x => x.id === sid);
+        if (!e2 || e2.locked) continue;
+        const eb = bounds(e2);
+        s0s[sid] = {
+          x: e2.x, y: e2.y,
+          w: e2.w || eb.w, h: e2.h || eb.h,
+          radius: e2.radius,
+          x1: e2.x1, y1: e2.y1, x2: e2.x2, y2: e2.y2,
+        };
+      }
+      drg = { type: 'resize', start: pos, handle: h, s0s, primaryId };
       pushH();
       return;
     }
@@ -280,31 +297,27 @@ CV.addEventListener('mousedown', e => {
     }
     _lastHit = hit.id;
 
-    // Locked elements can be selected but not moved
-    if (hit.locked) {
-      toast('Element locked — click 🔒 in layers to unlock');
-      drg = null;
-    } else {
-      // Children whose parent is also selected must be skipped —
-      // they follow automatically because their x/y are relative to the parent.
-      const selIds = new Set(S.sel);
-      const offs = [];
-      for (const id of S.sel) {
-        const el = S.els.find(e => e.id === id);
-        if (!el || el.locked) continue;
-        if (el.parentId && selIds.has(el.parentId)) continue;
-        offs.push(
-          (el.type === 'Line' || el.type === 'Polyline')
-            ? { id, x1: el.x1, y1: el.y1, x2: el.x2, y2: el.y2 }
-            : { id, x: el.x, y: el.y }
-        );
-      }
-      // pushH deferred to first actual pixel moved (avoids undo entry on plain click)
-      drg = offs.length ? { type: 'move', start: pos, offs, pushed: false } : null;
+    // hitTest already filters locked elements out (pass-through).
+    // Children whose parent is also selected must be skipped —
+    // they follow automatically because their x/y are relative to the parent.
+    const selIds = new Set(S.sel);
+    const offs = [];
+    for (const id of S.sel) {
+      const el = S.els.find(e => e.id === id);
+      if (!el || el.locked) continue;
+      if (el.parentId && selIds.has(el.parentId)) continue;
+      offs.push(
+        (el.type === 'Line' || el.type === 'Polyline')
+          ? { id, x1: el.x1, y1: el.y1, x2: el.x2, y2: el.y2 }
+          : { id, x: el.x, y: el.y }
+      );
     }
+    // pushH deferred to first actual pixel moved (avoids undo entry on plain click)
+    drg = offs.length ? { type: 'move', start: pos, offs, pushed: false } : null;
   } else {
     S.sel.clear();
     _lastHit = null;
+    _lastClickPos = null;
   }
 
   updateLayers();
@@ -354,38 +367,52 @@ document.addEventListener('mousemove', e => {
       if (!e.altKey && i === 0) doSnap(el);
     }
   } else if (drg.type === 'resize') {
-    const el  = S.els.find(e => S.sel.has(e.id));
-    if (!el) return;
-    const s   = drg.s0;
     const dir = drg.handle.dir;
+    // Resize every non-locked selected element using its own start snapshot.
+    for (const id of Object.keys(drg.s0s)) {
+      const el = S.els.find(e => e.id === id);
+      if (!el) continue;
+      const s  = drg.s0s[id];
 
-    // Shift = axis-lock (use dominant axis only)
-    // Ctrl  = preserve original aspect ratio
-    let ddx = dx, ddy = dy;
-    if (e.shiftKey) {
-      if (Math.abs(dx) > Math.abs(dy)) ddy = 0; else ddx = 0;
-    }
-    if (e.ctrlKey && s.w && s.h) {
-      const r = s.w / s.h;
-      if (Math.abs(ddx) > Math.abs(ddy)) ddy = ddx / r;
-      else                                ddx = ddy * r;
-    }
-
-    if (el.type === 'Circle') {
-      el.radius = Math.max(4, s.radius + Math.max(ddx, ddy) / 2);
-    } else if (el.type === 'Line' || el.type === 'Polyline') {
-      if (dir.includes('nw') || dir.includes('w') || dir.includes('sw')) {
-        el.x1 = s.x1 + ddx; el.y1 = s.y1 + ddy;
-      } else {
-        el.x2 = s.x2 + ddx; el.y2 = s.y2 + ddy;
+      // Shift = axis-lock (use dominant axis only)
+      // Ctrl  = preserve original aspect ratio
+      let ddx = dx, ddy = dy;
+      if (e.shiftKey) {
+        if (Math.abs(dx) > Math.abs(dy)) ddy = 0; else ddx = 0;
       }
-    } else {
-      if (dir.includes('e'))  el.w  = Math.max(8, s.w  + ddx);
-      if (dir.includes('s'))  el.h  = Math.max(8, s.h  + ddy);
-      if (dir.includes('w')) { el.x = s.x + ddx; el.w = Math.max(8, s.w - ddx); }
-      if (dir.includes('n')) { el.y = s.y + ddy; el.h = Math.max(8, s.h - ddy); }
-      // Snap moving edges (unless Alt held)
-      if (!e.altKey) doSnapResize(el, dir);
+      if (e.ctrlKey && s.w && s.h) {
+        const r = s.w / s.h;
+        if (Math.abs(ddx) > Math.abs(ddy)) ddy = ddx / r;
+        else                                ddx = ddy * r;
+      }
+
+      if (el.type === 'Circle') {
+        el.radius = Math.max(4, s.radius + Math.max(ddx, ddy) / 2);
+      } else if (el.type === 'Line' || el.type === 'Polyline') {
+        if (dir.includes('nw') || dir.includes('w') || dir.includes('sw')) {
+          el.x1 = s.x1 + ddx; el.y1 = s.y1 + ddy;
+        } else {
+          el.x2 = s.x2 + ddx; el.y2 = s.y2 + ddy;
+        }
+      } else {
+        // Clamp width/height at 8 px; mirror the position shift by how much
+        // the dimension ACTUALLY shrank — not by the raw delta — so the
+        // element doesn't slide past its own minimum edge.
+        if (dir.includes('e'))  el.w  = Math.max(8, s.w  + ddx);
+        if (dir.includes('s'))  el.h  = Math.max(8, s.h  + ddy);
+        if (dir.includes('w')) {
+          const newW = Math.max(8, s.w - ddx);
+          el.x = s.x + (s.w - newW);
+          el.w = newW;
+        }
+        if (dir.includes('n')) {
+          const newH = Math.max(8, s.h - ddy);
+          el.y = s.y + (s.h - newH);
+          el.h = newH;
+        }
+        // Snap moving edges — only on the primary to avoid conflicting pulls.
+        if (!e.altKey && id === drg.primaryId) doSnapResize(el, dir);
+      }
     }
   }
 
@@ -568,6 +595,7 @@ function delSel() {
   S.els = S.els.filter(e => !S.sel.has(e.id));
   S.sel.clear();
   _lastHit = null;
+  _lastClickPos = null;
   updateLayers(); updateProps(); updateCallbacks(); render();
 }
 
@@ -587,6 +615,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     S.sel.clear();
     _lastHit = null;
+    _lastClickPos = null;
     updateLayers(); updateProps(); updateCallbacks(); render();
   }
 
