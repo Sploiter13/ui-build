@@ -365,11 +365,27 @@ function render() {
       }
 
       case 'Button': {
-        ctx.fillStyle   = rgba(el.color);
-        ctx.strokeStyle = rgba(el.color);
-        ctx.lineWidth   = el.thickness || 1;
-        rrect(b.x, b.y, b.w, b.h, el.rounding || 0);
-        el.filled ? ctx.fill() : ctx.stroke();
+        // Image-button preview (Immediate mode only, gated by IMAGE_ENABLED)
+        const hasImg = el.imageUrl && S.drawingMode === 'immediate'
+          && (typeof IMAGE_ENABLED !== 'undefined' && IMAGE_ENABLED);
+        if (hasImg && !el._img) loadImg(el);
+        if (hasImg && el._img && el._ok) {
+          ctx.save();
+          rrect(b.x, b.y, b.w, b.h, el.rounding || 0);
+          ctx.clip();
+          ctx.drawImage(el._img, b.x, b.y, b.w, b.h);
+          // tint overlay using the button color (mirrors DI_Image tint behavior)
+          ctx.globalAlpha = 0.35;
+          ctx.fillStyle = rgba(el.color);
+          ctx.fillRect(b.x, b.y, b.w, b.h);
+          ctx.restore();
+        } else {
+          ctx.fillStyle   = rgba(el.color);
+          ctx.strokeStyle = rgba(el.color);
+          ctx.lineWidth   = el.thickness || 1;
+          rrect(b.x, b.y, b.w, b.h, el.rounding || 0);
+          el.filled ? ctx.fill() : ctx.stroke();
+        }
         // subtle highlight strip
         ctx.save();
         ctx.globalAlpha = 0.25;
@@ -397,6 +413,40 @@ function render() {
           b.x + b.w - 3, b.y + b.h - 3
         );
         ctx.textAlign = 'left';
+        break;
+      }
+
+      case 'Switch': {
+        const pillR = b.h / 2;
+        const trkR  = el.rounding != null ? Math.min(el.rounding, pillR) : pillR;
+        // Track
+        ctx.fillStyle = rgba(el.defaultEnabled
+          ? (el.onColor || '#4d90ff')
+          : (el.color   || '#3a3a3a'));
+        rrect(b.x, b.y, b.w, b.h, trkR);
+        ctx.fill();
+        // Knob (circle)
+        const knobR = b.h * 0.4;
+        const knobX = el.defaultEnabled
+          ? b.x + b.w - pillR
+          : b.x + pillR;
+        const knobY = b.y + b.h / 2;
+        ctx.fillStyle = rgba(el.knobColor || '#ffffff');
+        ctx.beginPath();
+        ctx.arc(knobX, knobY, knobR, 0, Math.PI * 2);
+        ctx.fill();
+        // Label
+        if (el.label) {
+          ctx.font         = `${el.textSize || 16}px "JetBrains Mono"`;
+          ctx.textBaseline = 'middle';
+          if (el.textOutline) {
+            ctx.strokeStyle = rgba('#000000');
+            ctx.lineWidth   = 2;
+            ctx.strokeText(el.label, b.x + b.w + 8, b.y + b.h / 2);
+          }
+          ctx.fillStyle = rgba(el.textColor || '#ffffff');
+          ctx.fillText(el.label, b.x + b.w + 8, b.y + b.h / 2);
+        }
         break;
       }
     }
@@ -464,13 +514,20 @@ function render() {
 
 /* ═══════════════════════════════════════════
    IMAGE LOADER
+   Used by both the Image element (el.url) and Button image-mode (el.imageUrl).
 ═══════════════════════════════════════════ */
 function loadImg(el) {
+  const url = el.url || el.imageUrl;
+  if (!url) return;
   const img = new Image();
   img.crossOrigin = 'anonymous';
   img.onload  = () => { el._img = img; el._ok = true;  render(); };
   img.onerror = () => {                el._ok = false; render(); };
   el._img = img;
   el._ok  = false;
-  img.src = el.url;
+  img.src = url;
+}
+
+function elNeedsImg(e) {
+  return (e.type === 'Image' && e.url) || (e.type === 'Button' && e.imageUrl);
 }

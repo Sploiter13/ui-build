@@ -32,7 +32,17 @@ const FONTS = [
 /* ═══════════════════════════════════════════
    UI WIDGET TYPE SET
 ═══════════════════════════════════════════ */
-const UI_TYPES = new Set(['Checkbox','Keybind','Dropdown','Slider','Button']);
+const UI_TYPES = new Set(['Checkbox','Keybind','Dropdown','Slider','Button','Switch']);
+
+/* ═══════════════════════════════════════════
+   FEATURE FLAGS
+═══════════════════════════════════════════ */
+// Image drawing relies on DrawingImmediate.Image, which is not present on every
+// Severe build (calling it errors and aborts the whole Render). Disabled for now:
+// this hides the Image tool and the Button image-url option. The codegen + canvas
+// support is left intact and guarded, so flipping this back to true fully restores
+// the feature with no other changes.
+const IMAGE_ENABLED = false;
 
 /* ═══════════════════════════════════════════
    ACCENT PRESETS + SETTINGS

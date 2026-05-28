@@ -41,7 +41,7 @@ function undo() {
   _codeDirty = true;
   S.fut.push(ser());
   restoreSnap(S.hist.pop());
-  S.els.filter(e => e.type === 'Image' && e.url).forEach(loadImg);
+  S.els.filter(elNeedsImg).forEach(loadImg);
   _lastHit = null;
   _lastClickPos = null;
   rebuildCnt();
@@ -54,7 +54,7 @@ function redo() {
   _codeDirty = true;
   S.hist.push(ser());
   restoreSnap(S.fut.pop());
-  S.els.filter(e => e.type === 'Image' && e.url).forEach(loadImg);
+  S.els.filter(elNeedsImg).forEach(loadImg);
   _lastHit = null;
   _lastClickPos = null;
   rebuildCnt();
@@ -130,7 +130,7 @@ function loadJSON(ev) {
       rebuildCnt();
       if (d.w) { document.getElementById('icw').value = d.w; CV.width  = d.w; }
       if (d.h) { document.getElementById('ich').value = d.h; CV.height = d.h; }
-      S.els.filter(e => e.type === 'Image' && e.url).forEach(loadImg);
+      S.els.filter(elNeedsImg).forEach(loadImg);
       updateTabBar(); updateLayers(); updateProps(); updateCallbacks(); render(); updateModeUI();
       toast('Loaded!');
     } catch {
@@ -152,7 +152,7 @@ try {
     S.activeTab   = d.activeTab || S.tabs[0].id;
     S.drawingMode = d.drawingMode || 'static';
     rebuildCnt();
-    S.els.filter(e => e.type === 'Image' && e.url).forEach(loadImg);
+    S.els.filter(elNeedsImg).forEach(loadImg);
   }
 } catch {}
 
@@ -345,7 +345,7 @@ function wrapDynOptsExpr(rawExpr) {
 // Checkbox + toggle-Button. Keeping both in one PostLocal connect keeps PreLocal
 // lean (pure input/state) while still giving each polling widget its own
 // `wait()` throttle via a per-widget `_wt` deadline.
-function emitPostLocalInteractive(L, sorted, vn) {
+function emitPostLocalInteractive(L, sorted, vn, needsDestroy) {
   const eventWidgets   = [];
   const pollingWidgets = [];
   for (const el of sorted) {
@@ -353,11 +353,17 @@ function emitPostLocalInteractive(L, sorted, vn) {
     const act = el.action || 'CustomFunction';
     if (el.type === 'Keybind' && (
           act === 'ToggleUI' ||
+          act === 'DestroyUI' ||
           act.startsWith('switchTab:') ||
           act.startsWith('toggleTarget:')
         )) continue;
-    if (el.type === 'Button'  && act.startsWith('switchTab:')) continue;
-    if (el.type === 'Checkbox' || (el.type === 'Button' && el.toggleMode)) {
+    if (el.type === 'Button'  && (
+          act === 'DestroyUI' ||
+          act.startsWith('switchTab:')
+        )) continue;
+    if (el.type === 'Checkbox' ||
+        el.type === 'Switch' ||
+        (el.type === 'Button' && el.toggleMode)) {
       if ((el.callbackBody || '').trim()) pollingWidgets.push(el);
       continue;
     }
@@ -367,6 +373,10 @@ function emitPostLocalInteractive(L, sorted, vn) {
 
   if (eventWidgets.length === 0 && pollingWidgets.length === 0) return;
 
+  // Wrap PostLocal Connect with table.insert so DestroyUI can disconnect later.
+  const postConnPre = needsDestroy ? '        table.insert(_Conns, ' : '        ';
+  const postConnEnd = needsDestroy ? '        end))'                  : '        end)';
+
   L.push('');
   L.push('    do');
   for (const el of pollingWidgets) {
@@ -374,7 +384,7 @@ function emitPostLocalInteractive(L, sorted, vn) {
     L.push(`        local _wt${v}: number = 0`);
     L.push(`        local function _wait${v}(s: number) _wt${v} = os.clock() + s end`);
   }
-  L.push('        RunService.PostLocal:Connect(function()');
+  L.push(`${postConnPre}RunService.PostLocal:Connect(function()`);
   L.push('            if not isrbxactive() then return end');
 
   for (const el of eventWidgets) {
@@ -400,7 +410,9 @@ function emitPostLocalInteractive(L, sorted, vn) {
 
   for (const el of pollingWidgets) {
     const v        = vn(el);
-    const stateVar = el.type === 'Checkbox' ? `${v}Checked` : `${v}Toggled`;
+    const stateVar = el.type === 'Checkbox' ? `${v}Checked`
+                   : el.type === 'Switch'   ? `${v}Enabled`
+                   :                          `${v}Toggled`;
     L.push('');
     L.push(`            if E.${stateVar} and os.clock() >= _wt${v} then`);
     L.push(`                local state: boolean = true`);
@@ -410,8 +422,68 @@ function emitPostLocalInteractive(L, sorted, vn) {
     L.push(`            end`);
   }
 
-  L.push('        end)');
+  L.push(postConnEnd);
   L.push('    end');
+}
+
+/* ═══════════════════════════════════════════
+   DestroyUI HELPERS
+   Shared by static + immediate codegen.
+═══════════════════════════════════════════ */
+
+// List every Drawing-field suffix attached to an element in static mode.
+// Plain types (Square, Circle, Text, …) use `E.<v>` itself; compound widgets
+// use sub-fields (E.<v>Background, E.<v>Fill, …). Return null for "plain".
+function staticDrawingFields(el) {
+  switch (el.type) {
+    case 'Checkbox': return ['Background', 'Fill', 'Label'];
+    case 'Keybind':  return ['Background', 'Text'];
+    case 'Dropdown': {
+      const opts  = (el.options || 'Option 1').split(',').map(o => o.trim());
+      const isDyn = !!(el.dynamicOptions && el.dynamicOptions.trim());
+      const slots = isDyn ? (el.maxOptions || 20) : opts.length;
+      const arr   = ['Background', 'Text', 'Arrow'];
+      for (let i = 0; i < slots; i++) {
+        arr.push(`OptionBackground${i}`);
+        arr.push(`OptionText${i}`);
+      }
+      return arr;
+    }
+    case 'Slider': return ['Track', 'Fill', 'Knob', 'Label'];
+    case 'Button': return ['Background', 'Text'];
+    case 'Switch': return ['Track', 'Knob', 'Label'];
+    default:       return null;
+  }
+}
+
+// Emit the body of `_DestroyUI` in static mode: disconnects every connection
+// and Removes every Drawing object. Idempotent via `_Destroyed` guard.
+function emitDestroyUIStatic(L, sorted, vn) {
+  L.push('local function _DestroyUI(): ()');
+  L.push('    if _Destroyed then return end');
+  L.push('    _Destroyed = true');
+  L.push('    for _, c in _Conns do c:Disconnect() end');
+  L.push('    table.clear(_Conns)');
+  for (const el of sorted) {
+    const v      = vn(el);
+    const fields = staticDrawingFields(el);
+    if (fields === null) {
+      L.push(`    if E.${v} then E.${v}:Remove() end`);
+    } else {
+      for (const f of fields) L.push(`    if E.${v}${f} then E.${v}${f}:Remove() end`);
+    }
+  }
+  L.push('end');
+}
+
+// Emit `_DestroyUI` in immediate mode — no Drawings to Remove, just disconnect.
+function emitDestroyUIImmediate(L) {
+  L.push('local function _DestroyUI(): ()');
+  L.push('    if _Destroyed then return end');
+  L.push('    _Destroyed = true');
+  L.push('    for _, c in _Conns do c:Disconnect() end');
+  L.push('    table.clear(_Conns)');
+  L.push('end');
 }
 
 function makeVn() {
@@ -460,14 +532,21 @@ function genLua() {
   // the local name with no regard for emission order. The cache is emitted
   // once, immediately before the IIFE body begins.
   for (const el of sorted) {
-    if (el.type !== 'Button') continue;
-    hotColor(el.color);
-    hotColor(el.hoverColor || el.color);
-    if (el.toggleMode) hotColor(el.activeColor || '#2a5ec4');
-    hotColor(el.textColor || '#ffffff');
-    if ((el.action || '').startsWith('switchTab:')) {
-      hotColor(el.tabActiveColor || el.hoverColor || el.color);
-      hotColor(el.tabActiveTextColor || el.textColor || '#ffffff');
+    if (el.type === 'Button') {
+      hotColor(el.color);
+      hotColor(el.hoverColor || el.color);
+      if (el.toggleMode) hotColor(el.activeColor || '#2a5ec4');
+      hotColor(el.textColor || '#ffffff');
+      if ((el.action || '').startsWith('switchTab:')) {
+        hotColor(el.tabActiveColor || el.hoverColor || el.color);
+        hotColor(el.tabActiveTextColor || el.textColor || '#ffffff');
+      }
+    } else if (el.type === 'Switch') {
+      // Switch toggles between off/on track colors at click time — both
+      // must resolve to cached module-scope Color3 locals so the toggle
+      // path never allocates a Color3.
+      hotColor(el.color);                       // off track
+      hotColor(el.onColor || '#4d90ff');        // on track
     }
   }
   // "Center on viewport" setting: offset all position writes by _OFF at runtime
@@ -483,13 +562,23 @@ function genLua() {
   const hasDD      = sorted.some(e => e.type === 'Dropdown');
   const hasSL      = sorted.some(e => e.type === 'Slider');
   const hasBT      = sorted.some(e => e.type === 'Button');
+  const hasSW      = sorted.some(e => e.type === 'Switch');
   const dynTextEls      = sorted.filter(e => e.type === 'Text' && e.dynamicSource && e.dynamicSource !== '');
   const hasDynText      = dynTextEls.length > 0;
   const needsTabNames   = dynTextEls.some(e => e.dynamicSource === 'tabName');
   const hasRuntimeText  = dynTextEls.some(e => e.dynamicSource === 'runtime');
-  const needsInteractive = hasDrag || hasCB || hasKB || hasDD || hasSL || hasBT;
+  const needsInteractive = hasDrag || hasCB || hasKB || hasDD || hasSL || hasBT || hasSW;
   const needsInput      = needsInteractive || hasDynText;
   const draggables  = sorted.filter(e => e.type === 'Square' && e.draggable);
+  // DestroyUI: any Button/Keybind with action='DestroyUI' needs the connection
+  // tracking infrastructure and a _DestroyUI() helper.
+  const needsDestroy = sorted.some(e =>
+    (e.type === 'Button' || e.type === 'Keybind') && e.action === 'DestroyUI'
+  );
+  // Connect-line wrappers — when DestroyUI is needed, every connection is pushed
+  // into _Conns so it can be disconnected. Otherwise emit unwrapped (same as before).
+  const connPre = needsDestroy ? '    table.insert(_Conns, ' : '    ';
+  const connEnd = needsDestroy ? '    end))'                 : '    end)';
 
   // Tab helpers
   const multiTab      = S.tabs.length > 1;
@@ -551,7 +640,14 @@ function genLua() {
   L.push(';(function(): ()');
   L.push('');
   L.push('local E = {} -- holds all Drawing objects and widget state');
-  if (hasDD || hasBT || hasSL || hasCB || hasKB) {
+  if (needsDestroy) {
+    L.push('');
+    L.push('-- DestroyUI infrastructure: every connection is tracked so it can be');
+    L.push('-- disconnected, and every Drawing object is :Remove()d when triggered.');
+    L.push('local _Destroyed: boolean = false');
+    L.push('local _Conns: {RBXScriptConnection} = table.create(4)');
+  }
+  if (hasDD || hasBT || hasSL || hasCB || hasKB || hasSW) {
     L.push('');
     L.push('-- Truncate a Drawing Text object so its rendered width fits maxW pixels.');
     L.push('-- Appends an ellipsis when trimming. Binary-search on TextBounds for O(log n)');
@@ -616,14 +712,21 @@ function genLua() {
         const defIdx    = Math.max(0, Math.min(opts.length - 1, el.defaultIndex || 0));
         const isDynDD   = !!(el.dynamicOptions && el.dynamicOptions.trim());
         const slotCount = isDynDD ? (el.maxOptions || 20) : opts.length;
+        // autoSelectDefault only applies to static dropdowns — dynamic ones
+        // build their options on the first PreLocal tick, so the static default
+        // index isn't meaningful for them.
+        const autoSel   = !!el.autoSelectDefault && !isDynDD;
         L.push(`E.${v}Background = Drawing.new("Square")`);
         L.push(`E.${v}Text       = Drawing.new("Text")`);
         L.push(`E.${v}Arrow      = Drawing.new("Text")`);
         L.push(`E.${v}Selected   = "${opts[defIdx]}"`);
         L.push(`E.${v}Options    = { ${opts.map(o => `"${o}"`).join(', ')} }`);
         L.push(`E.${v}Open       = false`);
-        L.push(`E.${v}Fired      = false`);
-        L.push(`E.${v}FiredIdx   = 0`);
+        // When autoSelectDefault is on, Fired starts true with FiredIdx set to
+        // the default. The first PostLocal tick consumes the flag and dispatches
+        // the callback once with the default selection. Zero per-frame cost.
+        L.push(`E.${v}Fired      = ${autoSel}`);
+        L.push(`E.${v}FiredIdx   = ${autoSel ? defIdx + 1 : 0}`);
         if (isDynDD) L.push(`E.${v}SlotCount  = 0`);
         for (let i = 0; i < slotCount; i++) {
           L.push(`E.${v}OptionBackground${i} = Drawing.new("Square")`);
@@ -667,6 +770,12 @@ function genLua() {
         if (btEvt)         L.push(`E.${v}Fired    = false`);
         break;
       }
+      case 'Switch':
+        L.push(`E.${v}Track   = Drawing.new("Square")`);
+        L.push(`E.${v}Knob    = Drawing.new("Square")`);
+        L.push(`E.${v}Label   = Drawing.new("Text")`);
+        L.push(`E.${v}Enabled = ${!!el.defaultEnabled}`);
+        break;
       default:
         L.push(`E.${v} = Drawing.new("${el.type}")`);
     }
@@ -739,6 +848,11 @@ function genLua() {
             case 'Button':
               L.push(`    E.${v}Background.Visible = ${g} and ${vis}`);
               L.push(`    E.${v}Text.Visible       = ${g} and ${vis}`);
+              break;
+            case 'Switch':
+              L.push(`    E.${v}Track.Visible = ${g} and ${vis}`);
+              L.push(`    E.${v}Knob.Visible  = ${g} and ${vis}`);
+              L.push(`    E.${v}Label.Visible = ${g} and ${vis}`);
               break;
             default:
               L.push(`    E.${v}.Visible = ${g} and ${vis}`);
@@ -1065,6 +1179,49 @@ function genLua() {
         L.push(`    _FitText(E.${v}Text, ${Math.max(1, el.w - 8)})`);
         break;
       }
+
+      case 'Switch': {
+        const z         = safeZ;
+        const knobSize  = el.h - 4;
+        const knobOffX  = Math.round(b.x + 2);
+        const knobOnX   = Math.round(b.x + el.w - knobSize - 2);
+        const knobY     = Math.round(b.y + 2);
+        const lx        = Math.round(b.x + el.w + 8);
+        const ly        = Math.round(b.y + el.h/2 - (el.textSize || 16)/2);
+        const lbl       = (el.label || 'Switch').replace(/"/g, '\\"');
+        const rnd       = el.rounding != null ? el.rounding : Math.floor(el.h / 2);
+        const initColor = el.defaultEnabled ? c3(el.onColor || '#4d90ff') : c3(el.color);
+        const initKnobX = el.defaultEnabled ? knobOnX : knobOffX;
+
+        L.push(`    E.${v}Track.Position  = ${v2p(b.x, b.y)}`);
+        L.push(`    E.${v}Track.Size      = ${v2(el.w, el.h)}`);
+        L.push(`    E.${v}Track.Color     = ${initColor}`);
+        L.push(`    E.${v}Track.Filled    = true`);
+        L.push(`    E.${v}Track.Thickness = 1`);
+        L.push(`    E.${v}Track.Rounding  = ${rnd}`);
+        L.push(`    E.${v}Track.ZIndex    = ${z}`);
+        L.push(`    E.${v}Track.Visible   = ${!!el.visible}`);
+        L.push('');
+        L.push(`    E.${v}Knob.Position  = ${v2p(initKnobX, knobY)}`);
+        L.push(`    E.${v}Knob.Size      = ${v2(knobSize, knobSize)}`);
+        L.push(`    E.${v}Knob.Color     = ${c3(el.knobColor || '#ffffff')}`);
+        L.push(`    E.${v}Knob.Filled    = true`);
+        L.push(`    E.${v}Knob.Rounding  = ${Math.floor(knobSize / 2)}`);
+        L.push(`    E.${v}Knob.ZIndex    = ${z + 1}`);
+        L.push(`    E.${v}Knob.Visible   = ${!!el.visible}`);
+        L.push('');
+        L.push(`    E.${v}Label.Position     = ${v2p(lx, ly)}`);
+        L.push(`    E.${v}Label.Text         = "${lbl}"`);
+        L.push(`    E.${v}Label.Size         = ${el.textSize || 16}`);
+        L.push(`    E.${v}Label.Font         = ${el.font || 0}`);
+        L.push(`    E.${v}Label.Color        = ${c3(el.textColor || '#ffffff')}`);
+        L.push(`    E.${v}Label.Outline      = ${!!el.textOutline}`);
+        if (el.textOutline)
+          L.push(`    E.${v}Label.OutlineColor = ${outlineV3('#000000')}`);
+        L.push(`    E.${v}Label.ZIndex       = ${z + 1}`);
+        L.push(`    E.${v}Label.Visible      = ${!!el.visible}`);
+        break;
+      }
     }
   }
 
@@ -1171,6 +1328,12 @@ function genLua() {
       L.push('');
     }
 
+    // ── _DestroyUI helper (defined BEFORE connects so they can close over it) ──
+    if (needsDestroy) {
+      emitDestroyUIStatic(L, sorted, vn);
+      L.push('');
+    }
+
     // ── callback stubs + PreLocal + PostLocal (interactive elements only) ──
     if (needsInteractive) {
     // ── callback stubs (inside runtime do-block to stay under 200-local limit) ──
@@ -1178,10 +1341,14 @@ function genLua() {
       const elAct = el.action || 'CustomFunction';
       if (el.type === 'Keybind' && (
             elAct === 'ToggleUI' ||
+            elAct === 'DestroyUI' ||
             elAct.startsWith('switchTab:') ||
             elAct.startsWith('toggleTarget:')
           )) continue;
-      if (el.type === 'Button'  && elAct.startsWith('switchTab:')) continue;
+      if (el.type === 'Button'  && (
+            elAct === 'DestroyUI' ||
+            elAct.startsWith('switchTab:')
+          )) continue;
       const fnName = `On${vn(el)}${el.callback}`;
       let sig = '';
       if (el.type === 'Checkbox') sig = 'state: boolean';
@@ -1189,9 +1356,12 @@ function genLua() {
       if (el.type === 'Dropdown') sig = 'selected: string, index: number';
       if (el.type === 'Slider')   sig = 'value: number';
       if (el.type === 'Button')   sig = el.toggleMode ? 'state: boolean' : '';
+      if (el.type === 'Switch')   sig = 'state: boolean';
       L.push(`    local function ${fnName}(${sig}): ()`);
-      // Checkbox and toggle-Button bodies run every frame in PostLocal — stub stays empty
-      const bodyInPostLocal = el.type === 'Checkbox' || (el.type === 'Button' && el.toggleMode);
+      // Checkbox, Switch, and toggle-Button bodies run every frame in PostLocal — stub stays empty
+      const bodyInPostLocal = el.type === 'Checkbox'
+                          || el.type === 'Switch'
+                          || (el.type === 'Button' && el.toggleMode);
       const body = bodyInPostLocal ? '' : (el.callbackBody || '').trimEnd();
       if (body.trim()) {
         for (const line of body.split('\n')) L.push(`        ${line}`);
@@ -1203,7 +1373,7 @@ function genLua() {
     }
 
     // ── PreLocal: input + state only ─────────────────────────
-    L.push('    RunService.PreLocal:Connect(function()');
+    L.push(`${connPre}RunService.PreLocal:Connect(function()`);
     L.push('        if not isrbxactive() then return end  -- skip input when Roblox unfocused');
     L.push('        local Mouse: Vector2       = UserInputService:GetMouseLocation()');
     L.push('        local LeftPressed: boolean = isleftpressed()');
@@ -1239,6 +1409,55 @@ function genLua() {
       L.push('');
     }
 
+    // ── Switch click handlers ──
+    // Toggling a switch updates state AND writes the new Track.Color + Knob.Position
+    // inline so no per-frame property writes are needed. Colors come from the
+    // module-scope hot Color3 cache so there's zero per-click allocation. Knob
+    // positions are pre-computed at codegen time and emitted as inline Vector2.new
+    // calls (called rarely — only on toggle).
+    for (const el of sorted.filter(e => e.type === 'Switch')) {
+      const v        = vn(el);
+      const tg       = (multiTab && !el.shared) ? `ActiveTab == ${tabIdx(el)} and ` : '';
+      const cOn      = hotColor(el.onColor || '#4d90ff');
+      const cOff     = hotColor(el.color);
+      const knobSize = el.h - 4;
+      // Knob positions are written RELATIVE to the live Track.Position so they stay
+      // correct after the parent window is dragged or when centerOnViewport shifts
+      // everything. onX is the slid-right offset within the track; 2 is the inset.
+      const onOff    = el.w - knobSize - 2;
+      L.push(`        if ${tg}LeftClicked then`);
+      L.push(`            local Pos  = E.${v}Track.Position`);
+      L.push(`            local Size = E.${v}Track.Size`);
+      L.push(`            if Mouse.X >= Pos.X and Mouse.X <= Pos.X + Size.X`);
+      L.push(`            and Mouse.Y >= Pos.Y and Mouse.Y <= Pos.Y + Size.Y then`);
+      L.push(`                E.${v}Enabled = not E.${v}Enabled`);
+      if (el.exclusiveGroup) {
+        const peers = sorted.filter(e => e.type === 'Switch' && e.id !== el.id && e.exclusiveGroup === el.exclusiveGroup);
+        if (peers.length) {
+          L.push(`                if E.${v}Enabled then`);
+          for (const peer of peers) {
+            const pv   = vn(peer);
+            const pOff = hotColor(peer.color);
+            L.push(`                    E.${pv}Enabled        = false`);
+            L.push(`                    E.${pv}Track.Color    = ${pOff}`);
+            L.push(`                    E.${pv}Knob.Position  = E.${pv}Track.Position + Vector2.new(2, 2)`);
+          }
+          L.push(`                end`);
+        }
+      }
+      // Inline visual update — slide the knob relative to the current track position.
+      L.push(`                if E.${v}Enabled then`);
+      L.push(`                    E.${v}Track.Color   = ${cOn}`);
+      L.push(`                    E.${v}Knob.Position = Pos + Vector2.new(${onOff}, 2)`);
+      L.push(`                else`);
+      L.push(`                    E.${v}Track.Color   = ${cOff}`);
+      L.push(`                    E.${v}Knob.Position = Pos + Vector2.new(2, 2)`);
+      L.push(`                end`);
+      L.push(`            end`);
+      L.push(`        end`);
+      L.push('');
+    }
+
     // helper: emit static visibility setters for all elements (used by ToggleUI keybinds)
     const emitStaticVis = (indent) => {
       const p = ' '.repeat(indent);
@@ -1269,6 +1488,11 @@ function genLua() {
             L.push(`${p}E.${sv}Background.Visible = UIVisible and ${vis}`);
             L.push(`${p}E.${sv}Text.Visible       = UIVisible and ${vis}`);
             break;
+          case 'Switch':
+            L.push(`${p}E.${sv}Track.Visible = UIVisible and ${vis}`);
+            L.push(`${p}E.${sv}Knob.Visible  = UIVisible and ${vis}`);
+            L.push(`${p}E.${sv}Label.Visible = UIVisible and ${vis}`);
+            break;
           default:
             L.push(`${p}E.${sv}.Visible = UIVisible and ${vis}`);
         }
@@ -1279,6 +1503,7 @@ function genLua() {
       const v            = vn(el);
       const kbAct        = el.action || 'CustomFunction';
       const isTogUI      = kbAct === 'ToggleUI';
+      const isDestroyUI  = kbAct === 'DestroyUI';
       const isKbSwTab    = kbAct.startsWith('switchTab:');
       const isToggleTgt  = kbAct.startsWith('toggleTarget:');
       const tgtId        = isToggleTgt ? kbAct.slice('toggleTarget:'.length) : null;
@@ -1286,8 +1511,8 @@ function genLua() {
       const kbSwTabIdx   = isKbSwTab
         ? S.tabs.findIndex(t => t.id === kbAct.slice('switchTab:'.length)) + 1
         : 0;
-      // ToggleUI, switchTab, and toggleTarget keybinds fire from any tab; CustomFunction ones only on their tab
-      const tg = (multiTab && !el.shared && !isTogUI && !isKbSwTab && !isToggleTgt) ? `ActiveTab == ${tabIdx(el)} and ` : '';
+      // ToggleUI, DestroyUI, switchTab, and toggleTarget keybinds fire from any tab; CustomFunction ones only on their tab
+      const tg = (multiTab && !el.shared && !isTogUI && !isDestroyUI && !isKbSwTab && !isToggleTgt) ? `ActiveTab == ${tabIdx(el)} and ` : '';
       const clickTg = (multiTab && !el.shared) ? `ActiveTab == ${tabIdx(el)} and ` : '';
       L.push(`        if E.${v}Waiting then`);
       L.push(`            if E.${v}WaitReady then`);
@@ -1300,7 +1525,7 @@ function genLua() {
       L.push(`                    E.${v}DisplayText = "[" .. Pressed[1] .. "]"`);
       L.push(`                    E.${v}Text.Text   = E.${v}DisplayText`);
       // Key-capture fires CustomFunction once: flag, dispatch runs in PostLocal.
-      if (!isTogUI && !isKbSwTab && !isToggleTgt) L.push(`                    E.${v}Fired       = true`);
+      if (!isTogUI && !isDestroyUI && !isKbSwTab && !isToggleTgt) L.push(`                    E.${v}Fired       = true`);
       L.push(`                end`);
       L.push(`            elseif not LeftPressed then`);
       L.push(`                E.${v}WaitReady = true`);
@@ -1322,6 +1547,7 @@ function genLua() {
       // is dead — saves one TableFind fastcall per frame on a no-op keybind.
       const toggleTgtValid = isToggleTgt && (
         (tgt && tgt.type === 'Checkbox') ||
+        (tgt && tgt.type === 'Switch') ||
         (tgt && tgt.type === 'Button' && tgt.toggleMode)
       );
       const emitDispatch = !isToggleTgt || toggleTgtValid;
@@ -1332,6 +1558,11 @@ function genLua() {
           L.push(`                UIVisible = not UIVisible`);
           emitStaticVis(16);
           if (needsSetTab) L.push(`                if UIVisible then SetTab(ActiveTab) end`);
+        } else if (isDestroyUI) {
+          // DestroyUI: stop the whole UI cleanly. Removes every Drawing and
+          // disconnects every connection. Idempotent (no-op on repeat press).
+          L.push(`                _DestroyUI()`);
+          L.push(`                return`);
         } else if (isKbSwTab) {
           // switchTab runs inline in PreLocal — must affect ActiveTab before render reads it.
           L.push(`                SetTab(${kbSwTabIdx || 1})`);
@@ -1352,6 +1583,38 @@ function genLua() {
                 L.push(`                end`);
               }
             }
+          } else if (tgt.type === 'Switch') {
+            // Switch toggle-target: flip Enabled + update Track.Color + Knob.Position inline.
+            // Knob is positioned relative to the live Track.Position (drag/center safe).
+            const tv         = vn(tgt);
+            const tKnobSize  = tgt.h - 4;
+            const tOnOff     = tgt.w - tKnobSize - 2;
+            const tcOn       = hotColor(tgt.onColor || '#4d90ff');
+            const tcOff      = hotColor(tgt.color);
+            L.push(`                E.${tv}Enabled = not E.${tv}Enabled`);
+            if (tgt.exclusiveGroup) {
+              const peers = sorted.filter(pe =>
+                pe.type === 'Switch' && pe.id !== tgt.id && pe.exclusiveGroup === tgt.exclusiveGroup
+              );
+              if (peers.length) {
+                L.push(`                if E.${tv}Enabled then`);
+                for (const peer of peers) {
+                  const pv    = vn(peer);
+                  const pcOff = hotColor(peer.color);
+                  L.push(`                    E.${pv}Enabled        = false`);
+                  L.push(`                    E.${pv}Track.Color    = ${pcOff}`);
+                  L.push(`                    E.${pv}Knob.Position  = E.${pv}Track.Position + Vector2.new(2, 2)`);
+                }
+                L.push(`                end`);
+              }
+            }
+            L.push(`                if E.${tv}Enabled then`);
+            L.push(`                    E.${tv}Track.Color   = ${tcOn}`);
+            L.push(`                    E.${tv}Knob.Position = E.${tv}Track.Position + Vector2.new(${tOnOff}, 2)`);
+            L.push(`                else`);
+            L.push(`                    E.${tv}Track.Color   = ${tcOff}`);
+            L.push(`                    E.${tv}Knob.Position = E.${tv}Track.Position + Vector2.new(2, 2)`);
+            L.push(`                end`);
           } else {
             L.push(`                E.${vn(tgt)}Toggled = not E.${vn(tgt)}Toggled`);
           }
@@ -1473,11 +1736,16 @@ function genLua() {
       const v       = vn(el);
       const btAct   = el.action || 'CustomFunction';
       const isSwitchTab = btAct.startsWith('switchTab:');
+      const isDestroyBtn = btAct === 'DestroyUI';
       const switchTabIdx = isSwitchTab
         ? S.tabs.findIndex(t => t.id === btAct.slice('switchTab:'.length)) + 1
         : 0;
-      // switchTab buttons are shared nav buttons — always clickable; others only on their tab
-      const tg = (multiTab && !el.shared && !isSwitchTab) ? `ActiveTab == ${tabIdx(el)} and ` : '';
+      // A button can only be CLICKED when it's visible, so gate purely by tab
+      // membership (shared buttons fire from any tab; tab-specific ones only on
+      // their tab). This applies to switchTab/DestroyUI buttons too — otherwise
+      // their hidden hitbox on another tab steals overlapping clicks (e.g. a
+      // slider sitting where an off-tab Unload button used to be).
+      const tg = (multiTab && !el.shared) ? `ActiveTab == ${tabIdx(el)} and ` : '';
       L.push(`        do`);
       L.push(`            local Pos  = E.${v}Background.Position`);
       L.push(`            local Size = E.${v}Background.Size`);
@@ -1486,6 +1754,11 @@ function genLua() {
       L.push(`            if ${tg}Over and LeftClicked then`);
       if (isSwitchTab) {
         L.push(`                SetTab(${switchTabIdx || 1})`);
+      } else if (isDestroyBtn) {
+        // DestroyUI inline: stop the whole UI cleanly. Removes every Drawing and
+        // disconnects every connection. Idempotent (no-op on repeat click).
+        L.push(`                _DestroyUI()`);
+        L.push(`                return`);
       } else if (el.toggleMode) {
         L.push(`                E.${v}Toggled = not E.${v}Toggled`);
       } else {
@@ -1516,7 +1789,9 @@ function genLua() {
           }
         }
       }
-      const kidHitVar = kid => kid.type === 'Slider' ? `${vn(kid)}Track` : `${vn(kid)}Background`;
+      const kidHitVar = kid => (kid.type === 'Slider' || kid.type === 'Switch')
+        ? `${vn(kid)}Track`
+        : `${vn(kid)}Background`;
 
       L.push(`        do`);
       L.push(`            local SquarePos:  Vector2 = E.${v}.Position`);
@@ -1565,22 +1840,22 @@ function genLua() {
       L.push('');
       emitDynTextLines('        ');
     }
-    L.push('    end)');
+    L.push(connEnd);
 
     // ── PostLocal: unified event dispatch + every-frame polling bodies ───
     // Severe phase map: Render = draw only, PreLocal = logic/state mutation,
     // PostLocal = "per-frame logic after physics / input globals / free user code."
     // All user callback bodies (event + polling) run here so PreLocal stays
     // focused on input handling and never interleaves with user code.
-    emitPostLocalInteractive(L, sorted, vn);
+    emitPostLocalInteractive(L, sorted, vn, needsDestroy);
     } // end needsInteractive
     L.push('');
 
     // ── Standalone PreLocal for pure dynamic text (no interactive elements) ──
     if (hasDynText && !needsInteractive) {
-      L.push('    RunService.PreLocal:Connect(function()');
+      L.push(`${connPre}RunService.PreLocal:Connect(function()`);
       emitDynTextLines('        ');
-      L.push('    end)');
+      L.push(connEnd);
       L.push('');
     }
 
@@ -1589,7 +1864,7 @@ function genLua() {
     // keep rendering themselves once their properties are set — so every mutation here
     // (Visible, Color, Position, Size, Text) belongs in PreLocal, not Render.
     if (needsInteractive) {
-    L.push('    RunService.PreLocal:Connect(function()');
+    L.push(`${connPre}RunService.PreLocal:Connect(function()`);
     L.push('        if not isrbxactive() then return end  -- skip per-frame work when unfocused');
     if (needsMouse) {
       L.push('        local Mouse: Vector2 = UserInputService:GetMouseLocation()');
@@ -1786,6 +2061,15 @@ function genLua() {
         } else if (kid.type === 'Button') {
           L.push(`            E.${kv}Background.Position = NewPos + Vector2.new(${ox}, ${oy})`);
           L.push(`            E.${kv}Text.Position       = NewPos + Vector2.new(${ox + Math.round(kid.w/2)}, ${oy + Math.round(kid.h/2 - (kid.textSize||16)/2)})`);
+        } else if (kid.type === 'Switch') {
+          // Knob X depends on current Enabled state — branchless via if-expression.
+          const kPad     = 2;
+          const kKnobSz  = kid.h - 4;
+          const kKnobOnX = ox + kid.w - kKnobSz - kPad;
+          const kKnobOff = ox + kPad;
+          L.push(`            E.${kv}Track.Position    = NewPos + Vector2.new(${ox}, ${oy})`);
+          L.push(`            E.${kv}Knob.Position     = NewPos + Vector2.new(if E.${kv}Enabled then ${kKnobOnX} else ${kKnobOff}, ${oy + kPad})`);
+          L.push(`            E.${kv}Label.Position    = NewPos + Vector2.new(${ox + kid.w + 8}, ${oy + Math.round(kid.h/2 - (kid.textSize||16)/2)})`);
         } else if (kid.type === 'Circle') {
           const ocx = Math.round(kb.cx) - Math.round(b.x);
           const ocy = Math.round(kb.cy) - Math.round(b.y);
@@ -1821,7 +2105,7 @@ function genLua() {
       L.push('');
     }
 
-    L.push('    end)');
+    L.push(connEnd);
     } // end if (needsInteractive) Render block
     L.push('end');
   } else {
@@ -1853,11 +2137,12 @@ function genLuaImmediate() {
   const hasDD      = sorted.some(e => e.type === 'Dropdown');
   const hasSL      = sorted.some(e => e.type === 'Slider');
   const hasBT      = sorted.some(e => e.type === 'Button');
+  const hasSW      = sorted.some(e => e.type === 'Switch');
   const dynTextEls     = sorted.filter(e => e.type === 'Text' && e.dynamicSource && e.dynamicSource !== '');
   const hasDynText     = dynTextEls.length > 0;
   const needsTabNames  = dynTextEls.some(e => e.dynamicSource === 'tabName');
   const hasRuntimeText = dynTextEls.some(e => e.dynamicSource === 'runtime');
-  const needsInteractive = hasDrag || hasCB || hasKB || hasDD || hasSL || hasBT;
+  const needsInteractive = hasDrag || hasCB || hasKB || hasDD || hasSL || hasBT || hasSW;
   const needsInput     = needsInteractive || hasDynText;
   const draggables     = sorted.filter(e => e.type === 'Square' && e.draggable);
   const multiTab       = S.tabs.length > 1;
@@ -1867,6 +2152,14 @@ function genLuaImmediate() {
   );
   const hasToggleUI  = sorted.some(e => e.type === 'Keybind' && (e.action || 'CustomFunction') === 'ToggleUI');
   const needsMouse   = hasBT || hasDrag || hasSwitchTabAction;
+  // DestroyUI: track connections and emit _DestroyUI() if any Button/Keybind needs it.
+  const needsDestroy = sorted.some(e =>
+    (e.type === 'Button' || e.type === 'Keybind') && e.action === 'DestroyUI'
+  );
+  // Connection wrappers — every Connect goes through table.insert(_Conns, ...) when
+  // DestroyUI is in use so we can disconnect cleanly. Otherwise emit unwrapped.
+  const connPre = needsDestroy ? '    table.insert(_Conns, ' : '    ';
+  const connEnd = needsDestroy ? '    end))'                 : '    end)';
 
   if (!sorted.length) {
     return ['--!strict', '--!optimize 2', '', 'local RunService = game:GetService("RunService")'].join('\n');
@@ -1955,8 +2248,10 @@ function genLuaImmediate() {
     const W = Math.round(w), H = Math.round(h);
     const r = Math.max(0, Math.min(Math.round(rounding), Math.floor(W / 2), Math.floor(H / 2)));
     if (r <= 0) return;
-    getV(W - 2 * r, H,         hint + 'H');
-    getV(W,         H - 2 * r, hint + 'V');
+    // Only register the central bars that will actually be drawn — the full-pill
+    // case (2r == H or 2r == W) has a zero-size bar that emitFilledRect skips.
+    if (W - 2 * r > 0) getV(W - 2 * r, H,         hint + 'H');
+    if (H - 2 * r > 0) getV(W,         H - 2 * r, hint + 'V');
   };
 
   // Walk elements once to register all constants
@@ -1996,6 +2291,11 @@ function genLuaImmediate() {
       case 'Polyline':
         getC(el.color, v);
         if (!idc) { getP(b.wx1, b.wy1, v + 'A'); getP(b.wx2, b.wy2, v + 'B'); }
+        break;
+      case 'Image':
+        getC(el.color || '#ffffff', v);
+        getV(el.w, el.h, v);
+        if (!idc) getP(b.x, b.y, v);
         break;
       case 'Checkbox': {
         const pad = 3;
@@ -2061,6 +2361,23 @@ function genLuaImmediate() {
         }
         break;
       }
+      case 'Switch': {
+        // Both Off + On colors must be cached so render can pick via if-expression
+        // without ever allocating a Color3.
+        getC(el.color,                  v + 'SwOff');
+        getC(el.onColor || '#4d90ff',   v + 'SwOn');
+        getC(el.knobColor || '#ffffff', v + 'SwKn');
+        getC(el.textColor || '#ffffff', v + 'SwLb');
+        getV(el.w, el.h,                v + 'SwTk');
+        const sKnobSz = el.h - 4;
+        getV(sKnobSz, sKnobSz,          v + 'SwKn');
+        preRoundV(el.w, el.h, el.rounding != null ? el.rounding : Math.floor(el.h / 2), v + 'SwTk');
+        if (!idc) {
+          getP(b.x, b.y, v + 'SwTk');
+          getP(b.x + el.w + 8, b.y + Math.round(el.h / 2 - (el.textSize || 16) / 2), v + 'SwLb');
+        }
+        break;
+      }
     }
   }
 
@@ -2092,7 +2409,10 @@ function genLuaImmediate() {
   L.push('local DI_Polyline   = DrawingImmediate.Polyline');
   L.push('local DI_Text       = DrawingImmediate.Text');
   L.push('local DI_OText      = DrawingImmediate.OutlinedText');
-  L.push('local DI_Image      = DrawingImmediate.Image');
+  // Only localize DrawingImmediate.Image when the project actually uses an Image
+  // element or an image-button — otherwise it's an unused (and possibly nil) local.
+  const usesImage = sorted.some(e => e.type === 'Image' || (e.type === 'Button' && e.imageUrl && e.imageUrl.trim()));
+  if (usesImage) L.push('local DI_Image      = DrawingImmediate.Image');
   L.push('local DI_GetBounds  = DrawingImmediate.GetTextBounds');
   L.push('');
   L.push('-- Truncate text so its rendered width fits maxW pixels.');
@@ -2100,7 +2420,7 @@ function genLuaImmediate() {
   L.push('-- a cheap character-width estimate when the default font is used (nil).');
   L.push('-- Binary search → O(log n) GetTextBounds calls in the overflow path.');
   L.push('local function DI_FitText(text: string, size: number, font: string?, maxW: number): string');
-  L.push('    if font then');
+  L.push('    if font and DI_GetBounds then');
   L.push('        if DI_GetBounds(font, size, text).X <= maxW then return text end');
   L.push('        local lo: number, hi: number = 0, #text');
   L.push('        while lo < hi do');
@@ -2144,6 +2464,12 @@ function genLuaImmediate() {
   L.push(';(function(): ()');
   L.push('');
   L.push('local E = {} -- widget state and draggable positions');
+  if (needsDestroy) {
+    L.push('');
+    L.push('-- DestroyUI: track every Connect so it can be disconnected on demand.');
+    L.push('local _Destroyed: boolean = false');
+    L.push('local _Conns: {RBXScriptConnection} = table.create(3)');
+  }
   L.push('');
 
   // ── E table ── state only, no Drawing.new ─────────────────────
@@ -2192,12 +2518,16 @@ function genLuaImmediate() {
       case 'Dropdown': {
         const opts   = (el.options || 'Option 1').split(',').map(o => o.trim());
         const defIdx = Math.max(0, Math.min(opts.length - 1, el.defaultIndex || 0));
+        const isDynDD = !!(el.dynamicOptions && el.dynamicOptions.trim());
+        // autoSelectDefault: dispatch the callback once at startup with the
+        // default selection. Only meaningful for static dropdowns.
+        const autoSel = !!el.autoSelectDefault && !isDynDD;
         L.push(`E.${v}Selected = "${opts[defIdx]}"`);
         L.push(`E.${v}Options  = { ${opts.map(o => `"${o.replace(/"/g, '\\"')}"`).join(', ')} }`);
         L.push(`E.${v}Open     = false`);
-        if (el.dynamicOptions && el.dynamicOptions.trim()) L.push(`E.${v}SlotCount = 0`);
-        L.push(`E.${v}Fired    = false`);
-        L.push(`E.${v}FiredIdx = 0`);
+        if (isDynDD) L.push(`E.${v}SlotCount = 0`);
+        L.push(`E.${v}Fired    = ${autoSel}`);
+        L.push(`E.${v}FiredIdx = ${autoSel ? defIdx + 1 : 0}`);
         break;
       }
       case 'Slider':
@@ -2216,6 +2546,22 @@ function genLuaImmediate() {
         L.push(`E.${v}Hover   = false`);   // pre-computed hover flag
         L.push(`E.${v}BgColor = ${cachedColors.get(el.color)}`);  // pre-computed fill color
         if (btEvt) L.push(`E.${v}Fired   = false`);
+        break;
+      }
+      case 'Switch': {
+        // Pre-compute TrackColor + KnobX from defaultEnabled so the first frame
+        // doesn't need to wait on PreLocal to populate. PreLocal then keeps them
+        // in sync with E.<v>Enabled on every toggle.
+        const swKnobSize = el.h - 4;
+        const swKnobOn   = el.w - swKnobSize - 2;
+        const swKnobOff  = 2;
+        const cInitOn    = cachedColors.get(el.onColor || '#4d90ff');
+        const cInitOff   = cachedColors.get(el.color);
+        const initC      = el.defaultEnabled ? cInitOn : cInitOff;
+        const initX      = el.defaultEnabled ? swKnobOn : swKnobOff;
+        L.push(`E.${v}Enabled    = ${!!el.defaultEnabled}`);
+        L.push(`E.${v}TrackColor = ${initC}`);
+        L.push(`E.${v}KnobX      = ${initX}`);
         break;
       }
     }
@@ -2287,21 +2633,31 @@ function genLuaImmediate() {
   }
 
   if (needsInput) {
+    // ── _DestroyUI (defined BEFORE connects so they close over it) ──
+    if (needsDestroy) {
+      emitDestroyUIImmediate(L);
+      L.push('');
+    }
+
     // ── Callback stubs ───────────────────────────────────────────
     for (const el of sorted.filter(e => UI_TYPES.has(e.type))) {
       const v       = vn(el);
       const kbAct   = el.action || 'CustomFunction';
-      const isTogUI = el.type === 'Keybind' && kbAct === 'ToggleUI';
-      const isSwTab = (el.type === 'Keybind' || el.type === 'Button') && kbAct.startsWith('switchTab:');
-      const isTgtKB = el.type === 'Keybind' && kbAct.startsWith('toggleTarget:');
-      if (isTogUI || isSwTab || isTgtKB) continue;
-      const bodyInPost = el.type === 'Checkbox' || (el.type === 'Button' && el.toggleMode);
+      const isTogUI    = el.type === 'Keybind' && kbAct === 'ToggleUI';
+      const isDestroy  = (el.type === 'Keybind' || el.type === 'Button') && kbAct === 'DestroyUI';
+      const isSwTab    = (el.type === 'Keybind' || el.type === 'Button') && kbAct.startsWith('switchTab:');
+      const isTgtKB    = el.type === 'Keybind' && kbAct.startsWith('toggleTarget:');
+      if (isTogUI || isDestroy || isSwTab || isTgtKB) continue;
+      const bodyInPost = el.type === 'Checkbox'
+                     || el.type === 'Switch'
+                     || (el.type === 'Button' && el.toggleMode);
       let sig = '';
       if (el.type === 'Checkbox')  sig = 'state: boolean';
       if (el.type === 'Keybind')   sig = 'key: string';
       if (el.type === 'Dropdown')  sig = 'selected: string, index: number';
       if (el.type === 'Slider')    sig = 'value: number';
       if (el.type === 'Button')    sig = el.toggleMode ? 'state: boolean' : '';
+      if (el.type === 'Switch')    sig = 'state: boolean';
       L.push(`    local function On${v}${el.callback}(${sig}): ()`);
       const body = bodyInPost ? '' : (el.callbackBody || '').trimEnd();
       if (body.trim()) {
@@ -2314,7 +2670,7 @@ function genLuaImmediate() {
     }
 
     // ── PreLocal ──────────────────────────────────────────────────
-    L.push('    RunService.PreLocal:Connect(function()');
+    L.push(`${connPre}RunService.PreLocal:Connect(function()`);
     L.push('        if not isrbxactive() then return end  -- short-circuit when Roblox unfocused');
     L.push('        local Mouse: Vector2       = UserInputService:GetMouseLocation()');
     L.push('        local LeftPressed: boolean = isleftpressed()');
@@ -2359,17 +2715,41 @@ function genLuaImmediate() {
       L.push('');
     }
 
+    // Switches — click hit-test only. Render-state (TrackColor + KnobX) is
+    // recomputed in the per-frame precompute block below so a single E.Enabled
+    // bool drives both visual states with zero per-frame allocation.
+    for (const el of sorted.filter(e => e.type === 'Switch')) {
+      const v       = vn(el);
+      const tg      = (multiTab && !el.shared) ? `ActiveTab == ${tabIdx(el)} and ` : '';
+      const posExpr = hitPosExpr(el);
+      L.push(`        if ${tg}LeftClicked then`);
+      L.push(`            local _Pos = ${posExpr}`);
+      L.push(`            if Mouse.X >= _Pos.X and Mouse.X <= _Pos.X + ${el.w}`);
+      L.push(`            and Mouse.Y >= _Pos.Y and Mouse.Y <= _Pos.Y + ${el.h} then`);
+      if (el.exclusiveGroup) {
+        const peers = sorted.filter(e => e.type === 'Switch' && e.id !== el.id && e.exclusiveGroup === el.exclusiveGroup);
+        for (const p of peers) L.push(`                E.${vn(p)}Enabled = false`);
+        L.push(`                E.${v}Enabled = true`);
+      } else {
+        L.push(`                E.${v}Enabled = not E.${v}Enabled`);
+      }
+      L.push(`            end`);
+      L.push(`        end`);
+      L.push('');
+    }
+
     // Keybinds
     for (const el of sorted.filter(e => e.type === 'Keybind')) {
       const v        = vn(el);
       const kbAct    = el.action || 'CustomFunction';
       const isTogUI  = kbAct === 'ToggleUI';
+      const isDestroyUI = kbAct === 'DestroyUI';
       const isKbSwTab = kbAct.startsWith('switchTab:');
       const isToggleTgt = kbAct.startsWith('toggleTarget:');
       const tgtId    = isToggleTgt ? kbAct.slice('toggleTarget:'.length) : null;
       const tgt      = tgtId ? sorted.find(e => e.id === tgtId) : null;
       const kbSwTabIdx = isKbSwTab ? S.tabs.findIndex(t => t.id === kbAct.slice('switchTab:'.length)) + 1 : 0;
-      const tg       = (multiTab && !el.shared && !isTogUI && !isKbSwTab && !isToggleTgt) ? `ActiveTab == ${tabIdx(el)} and ` : '';
+      const tg       = (multiTab && !el.shared && !isTogUI && !isDestroyUI && !isKbSwTab && !isToggleTgt) ? `ActiveTab == ${tabIdx(el)} and ` : '';
       const clickTg  = (multiTab && !el.shared) ? `ActiveTab == ${tabIdx(el)} and ` : '';
       const posExpr  = hitPosExpr(el);
       L.push(`        if E.${v}Waiting then`);
@@ -2381,7 +2761,7 @@ function genLuaImmediate() {
       L.push(`                    E.${v}WaitReady   = false`);
       // Rebuild DisplayText once on capture — the only allocation site.
       L.push(`                    E.${v}DisplayText = "[" .. Pressed[1] .. "]"`);
-      if (!isTogUI && !isKbSwTab && !isToggleTgt) L.push(`                    E.${v}Fired       = true`);
+      if (!isTogUI && !isDestroyUI && !isKbSwTab && !isToggleTgt) L.push(`                    E.${v}Fired       = true`);
       L.push(`                end`);
       L.push(`            elseif not LeftPressed then`);
       L.push(`                E.${v}WaitReady = true`);
@@ -2401,6 +2781,7 @@ function genLuaImmediate() {
       // avoids one TableFind fastcall per frame for a no-op keybind.
       const toggleTgtValid = isToggleTgt && (
         (tgt && tgt.type === 'Checkbox') ||
+        (tgt && tgt.type === 'Switch') ||
         (tgt && tgt.type === 'Button' && tgt.toggleMode)
       );
       const emitDispatch = !isToggleTgt || toggleTgtValid;
@@ -2408,6 +2789,10 @@ function genLuaImmediate() {
         L.push(`            if ${tg}TableFind(Keys, E.${v}Key) and not TableFind(PrevKeys, E.${v}Key) then`);
         if (isTogUI) {
           L.push(`                UIVisible = not UIVisible`);
+        } else if (isDestroyUI) {
+          // DestroyUI: disconnect everything and stop. Idempotent.
+          L.push(`                _DestroyUI()`);
+          L.push(`                return`);
         } else if (isKbSwTab) {
           L.push(`                SetTab(${kbSwTabIdx || 1})`);
         } else if (isToggleTgt) {
@@ -2424,6 +2809,21 @@ function genLuaImmediate() {
                 // Unrolled at codegen time — no runtime loop, no iterator alloc.
                 L.push(`                if E.${tv}Checked then`);
                 for (const peer of peers) L.push(`                    E.${vn(peer)}Checked = false`);
+                L.push(`                end`);
+              }
+            }
+          } else if (tgt.type === 'Switch') {
+            // Immediate Switch only needs the Enabled flag flipped — the per-frame
+            // precompute will recompute TrackColor + KnobX automatically next tick.
+            const tv = vn(tgt);
+            L.push(`                E.${tv}Enabled = not E.${tv}Enabled`);
+            if (tgt.exclusiveGroup) {
+              const peers = sorted.filter(pe =>
+                pe.type === 'Switch' && pe.id !== tgt.id && pe.exclusiveGroup === tgt.exclusiveGroup
+              );
+              if (peers.length) {
+                L.push(`                if E.${tv}Enabled then`);
+                for (const peer of peers) L.push(`                    E.${vn(peer)}Enabled = false`);
                 L.push(`                end`);
               }
             }
@@ -2546,7 +2946,11 @@ function genLuaImmediate() {
       const b         = bounds(el);
       const kbAct     = el.action || 'CustomFunction';
       const isSwitchTab = kbAct.startsWith('switchTab:');
+      const isDestroyBtn = kbAct === 'DestroyUI';
       const switchTabIdx = isSwitchTab ? S.tabs.findIndex(t => t.id === kbAct.slice('switchTab:'.length)) + 1 : 0;
+      // Gate clicks purely by visibility (shared → any tab, else its own tab).
+      // switchTab/DestroyUI buttons included — a hidden off-tab button must not
+      // catch overlapping clicks (e.g. a slider over a hidden Unload button).
       const tg        = (multiTab && !el.shared) ? `ActiveTab == ${tabIdx(el)} and ` : '';
       const posExpr   = isDragChild(el)
         ? (() => { const par = dragParent(el); const pb = bounds(par); return `E.${vn(par)}Pos + Vector2.new(${Math.round(b.x - pb.x)}, ${Math.round(b.y - pb.y)})`; })()
@@ -2558,6 +2962,9 @@ function genLuaImmediate() {
       L.push(`            if ${tg}LeftClicked and _Over then`);
       if (isSwitchTab) {
         L.push(`                SetTab(${switchTabIdx || 1})`);
+      } else if (isDestroyBtn) {
+        L.push(`                _DestroyUI()`);
+        L.push(`                return`);
       } else if (el.toggleMode) {
         L.push(`                E.${v}Toggled = not E.${v}Toggled`);
       } else {
@@ -2588,7 +2995,9 @@ function genLuaImmediate() {
           }
         }
       }
-      const kidHitVar = kid => kid.type === 'Slider' ? `Pos_${vn(kid)}Tk` : `Pos_${vn(kid)}Bg`;
+      const kidHitVar = kid => (kid.type === 'Slider' || kid.type === 'Switch')
+        ? `Pos_${vn(kid)}Tk`
+        : `Pos_${vn(kid)}Bg`;
       L.push(`        do`);
       L.push(`            local _SqPos:  Vector2 = E.${v}Pos`);
       L.push(`            local _SqSize: Vector2 = E.${v}Size`);
@@ -2688,10 +3097,12 @@ function genLuaImmediate() {
     // Pre-compute per-frame render state in PreLocal so Render is pure draw calls.
     // (Severe rule: Render must be DRAWING ONLY — no hit-tests, no state mutation.)
     // Buttons: cache hover + final fill color. Sliders: cache fill width.
+    // Switches: cache TrackColor + KnobX based on Enabled flag.
     {
       const btns = sorted.filter(e => e.type === 'Button');
       const slds = sorted.filter(e => e.type === 'Slider');
-      if (btns.length || slds.length) L.push('');
+      const sws  = sorted.filter(e => e.type === 'Switch');
+      if (btns.length || slds.length || sws.length) L.push('');
       for (const el of btns) {
         const v  = vn(el);
         const b  = bounds(el);
@@ -2739,17 +3150,33 @@ function genLuaImmediate() {
         L.push(`            E.${v}FillW       = ${el.w} * _T`);
         L.push(`        end`);
       }
+      // Switches: pick TrackColor + KnobX from cached Color3 + constant pair via
+      // if-expression. Two reads + two writes; no allocation. Cheaper than
+      // gating on a _Prev flag for such a small computation.
+      for (const el of sws) {
+        const v   = vn(el);
+        const cOn  = cachedColors.get(el.onColor || '#4d90ff');
+        const cOff = cachedColors.get(el.color);
+        const swKnobSize = el.h - 4;
+        const knobOn  = el.w - swKnobSize - 2;
+        const knobOff = 2;
+        L.push(`        do`);
+        L.push(`            local _en: boolean = E.${v}Enabled`);
+        L.push(`            E.${v}TrackColor = if _en then ${cOn} else ${cOff}`);
+        L.push(`            E.${v}KnobX      = if _en then ${knobOn} else ${knobOff}`);
+        L.push(`        end`);
+      }
     }
 
     if (hasKB) L.push('        PrevKeys        = Keys');
     L.push('        PrevLeftPressed = LeftPressed');
-    L.push('    end)');
+    L.push(connEnd);
 
     // ── PostLocal: unified event dispatch + every-frame polling bodies ───
     // All user callback bodies (event-driven for Keybind/Dropdown/Slider/Button,
-    // polling for Checkbox/toggle-Button) run here. PreLocal stays pure input +
-    // state mutation — user code never interleaves with the input hot path.
-    emitPostLocalInteractive(L, sorted, vn);
+    // polling for Checkbox/Switch/toggle-Button) run here. PreLocal stays pure
+    // input + state mutation — user code never interleaves with the input hot path.
+    emitPostLocalInteractive(L, sorted, vn, needsDestroy);
 
     L.push('');
   } // end needsInput
@@ -2818,16 +3245,26 @@ function genLuaImmediate() {
         L.push(`${ind}DI_FRect(${posExpr}, ${sFull}, ${colorName}, ${oStr})`);
         return;
       }
-      const sHoriz = getV(W - 2 * r, H, hintTag + 'H');
-      const sVert  = getV(W, H - 2 * r, hintTag + 'V');
-      // 2 central bars
-      L.push(`${ind}DI_FRect(${posExpr} + Vector2.new(${r}, 0), ${sHoriz}, ${colorName}, ${oStr})`);
-      L.push(`${ind}DI_FRect(${posExpr} + Vector2.new(0, ${r}), ${sVert}, ${colorName}, ${oStr})`);
-      // 4 corner circles
+      // Full-pill degenerate cases: when the radius consumes the whole height
+      // (or width), the central cross-bar in that axis is zero-size and the two
+      // corner circles on that axis coincide. Skip the redundant draws — a pill
+      // (the Switch default, h=22 r=11) drops from 6 draw calls to 3.
+      const fullPillH = (2 * r >= H);   // horizontal pill — caps at left/right
+      const fullPillW = (2 * r >= W);   // vertical pill   — caps at top/bottom
+      // central bars (only the non-degenerate ones)
+      if (W - 2 * r > 0) {
+        const sHoriz = getV(W - 2 * r, H, hintTag + 'H');
+        L.push(`${ind}DI_FRect(${posExpr} + Vector2.new(${r}, 0), ${sHoriz}, ${colorName}, ${oStr})`);
+      }
+      if (H - 2 * r > 0) {
+        const sVert = getV(W, H - 2 * r, hintTag + 'V');
+        L.push(`${ind}DI_FRect(${posExpr} + Vector2.new(0, ${r}), ${sVert}, ${colorName}, ${oStr})`);
+      }
+      // corner circles — dedupe coincident centers in the full-pill cases
       L.push(`${ind}DI_FCircle(${posExpr} + Vector2.new(${r}, ${r}), ${r}, ${colorName}, ${oStr})`);
-      L.push(`${ind}DI_FCircle(${posExpr} + Vector2.new(${W - r}, ${r}), ${r}, ${colorName}, ${oStr})`);
-      L.push(`${ind}DI_FCircle(${posExpr} + Vector2.new(${r}, ${H - r}), ${r}, ${colorName}, ${oStr})`);
-      L.push(`${ind}DI_FCircle(${posExpr} + Vector2.new(${W - r}, ${H - r}), ${r}, ${colorName}, ${oStr})`);
+      if (!fullPillW)                 L.push(`${ind}DI_FCircle(${posExpr} + Vector2.new(${W - r}, ${r}), ${r}, ${colorName}, ${oStr})`);
+      if (!fullPillH)                 L.push(`${ind}DI_FCircle(${posExpr} + Vector2.new(${r}, ${H - r}), ${r}, ${colorName}, ${oStr})`);
+      if (!fullPillW && !fullPillH)   L.push(`${ind}DI_FCircle(${posExpr} + Vector2.new(${W - r}, ${H - r}), ${r}, ${colorName}, ${oStr})`);
     };
 
     // Emit draw calls in sorted order
@@ -3031,8 +3468,55 @@ function genLuaImmediate() {
           const lv    = `_bt${v}`;
           // BgColor is pre-computed in PreLocal as E.${v}BgColor — Render is pure draw.
           L.push(`${ind}local ${lv}: Vector2 = ${pExpr}`);
-          emitFilledRect(ind, lv, el.w, el.h, `E.${v}BgColor`, el.opacity ?? 1, el.rounding || 0, v + 'Bt');
+          if (el.imageUrl && el.imageUrl.trim()) {
+            // Image button: use DI_Image with E.<v>BgColor as tint so hover/toggle
+            // still modulate the visual. The image URL string is a literal so it
+            // re-uses the interned-string identity each frame — zero allocation.
+            // Guarded: if this Severe build lacks DrawingImmediate.Image, fall back
+            // to a plain coloured button so the menu still works (and the missing
+            // builtin never aborts the whole Render).
+            const sBg = cachedV2Sizes.get(`${Math.round(el.w)},${Math.round(el.h)}`);
+            const safeUrl = el.imageUrl.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            L.push(`${ind}if DI_Image then`);
+            L.push(`${ind}    DI_Image("${safeUrl}", ${lv}, ${sBg}, E.${v}BgColor, ${fn(el.opacity ?? 1)}, false, ${el.rounding || 0})`);
+            L.push(`${ind}else`);
+            emitFilledRect(ind + '    ', lv, el.w, el.h, `E.${v}BgColor`, el.opacity ?? 1, el.rounding || 0, v + 'Bt');
+            L.push(`${ind}end`);
+          } else {
+            emitFilledRect(ind, lv, el.w, el.h, `E.${v}BgColor`, el.opacity ?? 1, el.rounding || 0, v + 'Bt');
+          }
           L.push(`${ind}DI_OText(${lv} + Vector2.new(${tx}, ${ty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, DI_FitText("${(el.label || 'Button').replace(/"/g, '\\"')}", ${el.textSize || 16}, ${fontName({ font: el.font })}, ${Math.max(1, el.w - 8)}), true${fn3})`);
+          break;
+        }
+        case 'Switch': {
+          const rp    = renderPos(el);
+          const pExpr = rp.isLocal ? (() => { const lv2 = `_p${v}`; L.push(`${ind}local ${lv2}: Vector2 = ${rp.expr}`); return lv2; })() : rp.expr;
+          const cKn   = cachedColors.get(el.knobColor || '#ffffff');
+          const cLb   = cachedColors.get(el.textColor || '#ffffff');
+          const knobSize = el.h - 4;
+          const knobR    = knobSize / 2;
+          const lx       = el.w + 8;
+          const ly       = Math.round(el.h / 2 - (el.textSize || 16) / 2);
+          const fn3      = fontArg({ font: el.font });
+          const rounding = el.rounding != null ? el.rounding : Math.floor(el.h / 2);
+          const lv       = `_sw${v}`;
+          // TrackColor + KnobX precomputed in PreLocal — Render reads cached refs only.
+          L.push(`${ind}local ${lv}: Vector2 = ${pExpr}`);
+          emitFilledRect(ind, lv, el.w, el.h, `E.${v}TrackColor`, el.opacity ?? 1, rounding, v + 'SwTk');
+          L.push(`${ind}DI_FCircle(${lv} + Vector2.new(E.${v}KnobX + ${knobR}, ${2 + knobR}), ${knobR}, ${cKn}, ${fn(el.opacity ?? 1)})`);
+          L.push(`${ind}DI_OText(${lv} + Vector2.new(${lx}, ${ly}), ${el.textSize || 16}, ${cLb}, ${fn(el.opacity ?? 1)}, "${(el.label || 'Switch').replace(/"/g, '\\"')}", false${fn3})`);
+          break;
+        }
+        case 'Image': {
+          const rp     = renderPos(el);
+          const pExpr  = rp.isLocal ? (() => { const lv2 = `_p${v}`; L.push(`${ind}local ${lv2}: Vector2 = ${rp.expr}`); return lv2; })() : rp.expr;
+          const sName  = cachedV2Sizes.get(`${Math.round(el.w)},${Math.round(el.h)}`);
+          const cName  = cachedColors.get(el.color);
+          const safeUrl = (el.url || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+          // Image source is an interned string literal — same identity each frame.
+          // Guarded: skip silently if DrawingImmediate.Image is unavailable in this
+          // build, so a missing builtin can't abort the rest of the Render.
+          L.push(`${ind}if DI_Image then DI_Image("${safeUrl}", ${pExpr}, ${sName}, ${cName}, ${fn(el.opacity ?? 1)}, ${!!el.gif}, ${el.rounding || 0}) end`);
           break;
         }
       }
@@ -3041,7 +3525,7 @@ function genLuaImmediate() {
     }
 
   L.push('    end');
-  L.push('    RunService.Render:Connect(_Render)');
+  L.push(`${connPre}RunService.Render:Connect(_Render)${needsDestroy ? ')' : ''}`);
   L.push('end');
 
   L.push('');
@@ -3056,17 +3540,28 @@ function setDrawingMode(val) {
   S.drawingMode = val;
   _codeDirty = true;
   updateModeUI();
+  // Image tool + image-button props are Immediate-only \u2014 re-render dependent UI.
+  if (typeof updateProps === 'function')  updateProps();
+  if (typeof render === 'function')       render();
 }
 
 function updateModeUI() {
-  const label = (S.drawingMode || 'static') === 'immediate' ? 'Immediate Mode' : 'Static Mode';
+  const isImmediate = (S.drawingMode || 'static') === 'immediate';
+  // Image tool is Immediate-only AND gated by the IMAGE_ENABLED feature flag.
+  const imageOn = isImmediate && (typeof IMAGE_ENABLED !== 'undefined' && IMAGE_ENABLED);
+  const label = isImmediate ? 'Immediate Mode' : 'Static Mode';
+  const widgets = 'Checkbox / Keybind / Dropdown / Slider / Button / Switch'
+    + (imageOn ? ' / Image' : '');
   const sbar = document.getElementById('sbar-mode');
-  if (sbar) sbar.textContent = `v4 \u00b7 ${label} \u00b7 Checkbox / Keybind / Dropdown / Slider / Button`;
+  if (sbar) sbar.textContent = `v5 \u00b7 ${label} \u00b7 ${widgets}`;
   const val = S.drawingMode || 'static';
   const sel = document.getElementById('si-drawmode');
   if (sel) sel.value = val;
   const selBar = document.getElementById('si-drawmode-bar');
   if (selBar) selBar.value = val;
+  // Show the Image tool button only when the feature is enabled and in Immediate mode.
+  const imageBtn = document.querySelector('.tool[data-t="Image"]');
+  if (imageBtn) imageBtn.style.display = imageOn ? '' : 'none';
 }
 
 /* ═══════════════════════════════════════════

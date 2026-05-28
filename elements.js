@@ -94,7 +94,19 @@ function mkEl(type, x, y) {
         hoverColor: '#6aa8ff', toggleMode: false, activeColor: '#2a5ec4',
         tabActiveColor: '', tabActiveTextColor: '',
         action: 'CustomFunction',
+        imageUrl: '',
         callback: 'Click', callbackBody: '' };
+
+    case 'Switch':
+      return { ...base, x, y, w: 44, h: 22,
+        color:     '#3a3a3a',
+        onColor:   '#4d90ff',
+        knobColor: '#ffffff',
+        rounding:  11,
+        defaultEnabled: false,
+        label: 'Switch',
+        textSize: 16, textColor: '#ffffff', textOutline: false, font: 0,
+        callback: 'Toggle', exclusiveGroup: '', callbackBody: '' };
   }
 }
 
@@ -129,6 +141,7 @@ function bounds(el) {
     case 'Dropdown':
     case 'Slider':
     case 'Button':
+    case 'Switch':
       return { x: px + el.x, y: py + el.y, w: el.w, h: el.h };
 
     case 'Circle': {
@@ -245,6 +258,7 @@ function sp(id, k, v) {
   el[k] = v;
   _codeDirty = true;
   if (k === 'url' && el.type === 'Image') loadImg(el);
+  if (k === 'imageUrl' && el.type === 'Button') { el._img = null; el._ok = false; loadImg(el); }
   if (k === 'name' || k === 'visible' || k === 'zIndex') updateLayers();
   // Keys that affect what the Callbacks tab renders (name in header, action
   // toggles body-edit eligibility, toggleMode swaps Button signature,

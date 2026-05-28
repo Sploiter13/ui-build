@@ -65,6 +65,7 @@ function cbFnSig(el) {
     case 'Dropdown': return `${fn}(selected: string, index: number)`;
     case 'Slider':   return `${fn}(value: number)`;
     case 'Button':   return el.toggleMode ? `${fn}(state: boolean)` : `${fn}()`;
+    case 'Switch':   return `${fn}(state: boolean)`;
     default:         return fn;
   }
 }
@@ -75,6 +76,7 @@ function cbBodyHint(el) {
     case 'Dropdown': return 'selected: string, index: number &mdash; index is 1-based';
     case 'Slider':   return 'value: number &mdash; current slider value';
     case 'Button':   return el.toggleMode ? 'state: boolean &mdash; true when toggled on &bull; use wait(n) for waiting' : '(no parameters)';
+    case 'Switch':   return 'state: boolean &mdash; true when switch is on &bull; use wait(n) for waiting';
     default:         return '';
   }
 }
@@ -87,6 +89,7 @@ function cbBodyExample(el) {
     case 'Button':   return el.toggleMode
       ? 'if state then\n    warn("on")\nelse\n    warn("off")\nend'
       : 'warn("clicked")';
+    case 'Switch':   return 'if state then\n    warn("switch on")\nelse\n    warn("switch off")\nend';
     default:         return '-- write your Lua code here';
   }
 }
@@ -102,20 +105,25 @@ function cbBodyScope(el) {
     case 'Button':   return el.toggleMode
       ? `<code>state</code>, <code>wait(n)</code>, ${common}`
       : common;
+    case 'Switch':   return `<code>state</code>, <code>wait(n)</code>, ${common}`;
     default:         return common;
   }
 }
-// Is this widget's callback action a user CustomFunction (vs. ToggleUI / switchTab / toggleTarget)?
+// Is this widget's callback action a user CustomFunction (vs. ToggleUI / DestroyUI / switchTab / toggleTarget)?
 // Only CustomFunction widgets have an editable body.
 function cbHasBody(el) {
   if (!UI_TYPES.has(el.type)) return false;
   const act = el.action || 'CustomFunction';
   if (el.type === 'Keybind' && (
         act === 'ToggleUI' ||
+        act === 'DestroyUI' ||
         act.startsWith('switchTab:') ||
         act.startsWith('toggleTarget:')
       )) return false;
-  if (el.type === 'Button'  && act.startsWith('switchTab:')) return false;
+  if (el.type === 'Button'  && (
+        act === 'DestroyUI' ||
+        act.startsWith('switchTab:')
+      )) return false;
   return true;
 }
 
@@ -412,19 +420,22 @@ function updateProps() {
   h += `</div>`;
 
   // ── Appearance ──────────────────────────────────────────────
-  h += `<div class="pg"><div class="pgt">Appearance</div>`;
-  h += r('Color', crow('color'));
-  if (!['Image','Checkbox','Keybind','Dropdown','Slider','Button'].includes(el.type))
-    h += r('Thickness', num('thickness', 0, 0.5));
-  if (['Square','Triangle','Polyline'].includes(el.type))
-    h += r('Filled', chk('filled'));
-  if (['Square','Image','Checkbox','Keybind','Dropdown','Button'].includes(el.type))
-    h += r('Rounding', num('rounding', 0));
-  if (el.type === 'Circle')
-    h += r('NumSides',
-      `<input class="pi" type="number" min="3" max="128" value="${el.numSides || 64}"
-         onchange="sp('${el.id}','numSides',+this.value)">`);
-  h += `</div>`;
+  // Switch has its own dedicated Off/On/Knob color section — skip the generic one.
+  if (el.type !== 'Switch') {
+    h += `<div class="pg"><div class="pgt">Appearance</div>`;
+    h += r('Color', crow('color'));
+    if (!['Image','Checkbox','Keybind','Dropdown','Slider','Button'].includes(el.type))
+      h += r('Thickness', num('thickness', 0, 0.5));
+    if (['Square','Triangle','Polyline'].includes(el.type))
+      h += r('Filled', chk('filled'));
+    if (['Square','Image','Checkbox','Keybind','Dropdown','Button'].includes(el.type))
+      h += r('Rounding', num('rounding', 0));
+    if (el.type === 'Circle')
+      h += r('NumSides',
+        `<input class="pi" type="number" min="3" max="128" value="${el.numSides || 64}"
+           onchange="sp('${el.id}','numSides',+this.value)">`);
+    h += `</div>`;
+  }
 
   // ── Text ────────────────────────────────────────────────────
   if (el.type === 'Text') {
@@ -493,16 +504,17 @@ function updateProps() {
     // Collect every toggleable widget in the project so the key can flip any of them.
     // Keybinds work across tabs, so we include targets from every tab (not just the active one).
     const toggleTargets = S.els.filter(e =>
-      e.type === 'Checkbox' || (e.type === 'Button' && e.toggleMode)
+      e.type === 'Checkbox' || e.type === 'Switch' || (e.type === 'Button' && e.toggleMode)
     );
     const actionSel = `<select class="pi" onchange="sp('${el.id}','action',this.value)">
       <option value="CustomFunction"${kbAction === 'CustomFunction' ? ' selected' : ''}>Custom Function</option>
       <option value="ToggleUI"${kbAction === 'ToggleUI' ? ' selected' : ''}>Toggle UI</option>
+      <option value="DestroyUI"${kbAction === 'DestroyUI' ? ' selected' : ''}>Destroy UI</option>
       ${S.tabs.map((t, i) =>
         `<option value="switchTab:${t.id}"${kbAction === `switchTab:${t.id}` ? ' selected' : ''}>Switch Tab → ${esc(t.name)}</option>`
       ).join('')}
       ${toggleTargets.map(t =>
-        `<option value="toggleTarget:${t.id}"${kbAction === `toggleTarget:${t.id}` ? ' selected' : ''}>Toggle → ${esc(t.name)} (${t.type === 'Button' ? 'Button' : 'Checkbox'})</option>`
+        `<option value="toggleTarget:${t.id}"${kbAction === `toggleTarget:${t.id}` ? ' selected' : ''}>Toggle → ${esc(t.name)} (${t.type})</option>`
       ).join('')}
     </select>`;
     h += `<div class="pg"><div class="pgt">Keybind</div>`;
@@ -518,6 +530,9 @@ function updateProps() {
       } else {
         h += `<div class="info" style="color:var(--org)">⚠ Toggle target no longer exists — this keybind will be silent. Pick a new target or switch action back to Custom Function.</div>`;
       }
+    }
+    if (kbAction === 'DestroyUI') {
+      h += `<div class="info" style="color:var(--org)">Permanently removes every Drawing in this UI and disconnects all RunService callbacks. The script effectively stops after this fires. Use to close a menu cleanly without crashing Drawing.clear().</div>`;
     }
     h += r('Filled',       chk('filled'));
     h += r('Text Size',    num('textSize', 4));
@@ -544,6 +559,8 @@ function updateProps() {
             </div>`;
       h += `<div class="info">One option per comma. Default Index is 0-based (0 = first option)</div>`;
       h += r('Default Index', num('defaultIndex', 0));
+      h += r('Auto-Select Default', chk('autoSelectDefault'));
+      h += `<div class="info">When enabled, fires the callback once at startup with the default-selected option — no need for the user to pick it manually.</div>`;
     }
     h += `<div class="pr"><span class="pl">Dynamic Options</span>
             <textarea class="ta" rows="5"
@@ -595,6 +612,7 @@ function updateProps() {
     const btAction = el.action || 'CustomFunction';
     const btActionSel = `<select class="pi" onchange="sp('${el.id}','action',this.value)">
       <option value="CustomFunction"${btAction === 'CustomFunction' ? ' selected' : ''}>Custom Function</option>
+      <option value="DestroyUI"${btAction === 'DestroyUI' ? ' selected' : ''}>Destroy UI</option>
       ${S.tabs.map((t, i) =>
         `<option value="switchTab:${t.id}"${btAction === `switchTab:${t.id}` ? ' selected' : ''}>Switch Tab → ${esc(t.name)}</option>`
       ).join('')}
@@ -614,6 +632,14 @@ function updateProps() {
     h += r('Filled',      chk('filled'));
     h += r('Thickness',   num('thickness', 0, 0.5));
     h += r('Font',        fntSel());
+    // Image-button — Immediate mode only, gated by the IMAGE_ENABLED feature flag.
+    if (S.drawingMode === 'immediate' && typeof IMAGE_ENABLED !== 'undefined' && IMAGE_ENABLED) {
+      h += r('Image URL', txt('imageUrl', 'https://... (optional)'));
+      h += `<div class="info cyan">Immediate-mode only. When set, the button background becomes this image — tinted by the current Color / Hover / Active state so hover & toggle still work visually.</div>`;
+    }
+    if (btAction === 'DestroyUI') {
+      h += `<div class="info" style="color:var(--org)">Permanently removes every Drawing in this UI and disconnects all RunService callbacks. Use to close the menu cleanly without crashing Drawing.clear().</div>`;
+    }
     h += `</div>`;
     if (btAction === 'CustomFunction') {
       h += `<div class="pg"><div class="pgt">Callback</div>`;
@@ -625,6 +651,30 @@ function updateProps() {
       h += bodyTA();
       h += `</div>`;
     }
+  }
+
+  // ── Switch ───────────────────────────────────────────────────
+  if (el.type === 'Switch') {
+    h += `<div class="pg"><div class="pgt">Switch</div>`;
+    h += r('Default On',   chk('defaultEnabled'));
+    h += r('Off Color',    crow('color'));
+    h += r('On Color',     crow('onColor'));
+    h += r('Knob Color',   crow('knobColor'));
+    h += r('Rounding',     num('rounding', 0));
+    h += `<div class="info">Track corner radius. Set to half the height for a pill (e.g. h=22 → rounding=11).</div>`;
+    h += r('Label',        txt('label'));
+    h += r('Text Size',    num('textSize', 4));
+    h += r('Text Color',   crow('textColor'));
+    h += r('Text Outline', chk('textOutline'));
+    h += r('Font',         fntSel());
+    h += `</div>`;
+    h += `<div class="pg"><div class="pgt">Callback</div>`;
+    h += `<div class="pr"><span class="pl">Fn</span><div class="fnprev">${esc(fnSig())}</div></div>`;
+    h += r('Suffix',      txt('callback', 'Toggle'));
+    h += r('Excl. Group', txt('exclusiveGroup', 'e.g. modes'));
+    h += `<div class="info">If set, turning this on will turn off every other Switch with the same group name.</div>`;
+    h += bodyTA();
+    h += `</div>`;
   }
 
   // ── Square: draggable ────────────────────────────────────────
