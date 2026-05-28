@@ -532,7 +532,7 @@ function updateProps() {
       }
     }
     if (kbAction === 'DestroyUI') {
-      h += `<div class="info" style="color:var(--org)">Permanently removes every Drawing in this UI and disconnects all RunService callbacks. The script effectively stops after this fires. Use to close a menu cleanly without crashing Drawing.clear().</div>`;
+      h += `<div class="info" style="color:var(--org)">Permanently removes every Drawing in this UI and disconnects all RunService callbacks. The script effectively stops after this fires.</div>`;
     }
     h += r('Filled',       chk('filled'));
     h += r('Text Size',    num('textSize', 4));
@@ -638,7 +638,7 @@ function updateProps() {
       h += `<div class="info cyan">Immediate-mode only. When set, the button background becomes this image — tinted by the current Color / Hover / Active state so hover & toggle still work visually.</div>`;
     }
     if (btAction === 'DestroyUI') {
-      h += `<div class="info" style="color:var(--org)">Permanently removes every Drawing in this UI and disconnects all RunService callbacks. Use to close the menu cleanly without crashing Drawing.clear().</div>`;
+      h += `<div class="info" style="color:var(--org)">Permanently removes every Drawing in this UI and disconnects all RunService callbacks.</div>`;
     }
     h += `</div>`;
     if (btAction === 'CustomFunction') {
