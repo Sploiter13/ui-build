@@ -96,7 +96,9 @@ function cbBodyExample(el) {
 // Describes which locals and helpers are in-scope inside the callback body.
 // Rendered in the Callbacks tab below the signature.
 function cbBodyScope(el) {
-  const common = '<code>E.*</code> (widget state)';
+  // SetTab(n) is in scope for every callback body whenever the project has 2+ tabs.
+  const tabFn  = (S.tabs.length > 1) ? ', <code>SetTab(n)</code>' : '';
+  const common = `<code>E.*</code> (widget state)${tabFn}`;
   switch (el.type) {
     case 'Checkbox': return `<code>state</code>, <code>wait(n)</code>, ${common}`;
     case 'Keybind':  return `<code>key</code>, ${common}`;
@@ -434,6 +436,14 @@ function updateProps() {
       h += r('NumSides',
         `<input class="pi" type="number" min="3" max="128" value="${el.numSides || 64}"
            onchange="sp('${el.id}','numSides',+this.value)">`);
+    // Rotation — Square + Triangle only. (Severe's Circle is symmetric; Text/Image
+    // have no rotation in the Drawing API, so it isn't offered for those.)
+    if (['Square','Triangle'].includes(el.type)) {
+      h += r('Rotation', `<input class="pi" type="number" min="-360" max="360" step="1" value="${el.rotation || 0}"
+           onchange="sp('${el.id}','rotation',+this.value)">`);
+      if (el.type === 'Square' && el.rotation)
+        h += `<div class="info">Rotated squares render as a quad and can't be draggable. Hit-testing in this editor stays axis-aligned.</div>`;
+    }
     h += `</div>`;
   }
 

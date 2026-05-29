@@ -328,6 +328,44 @@ function fn(n) {
   return Number.isInteger(n) ? String(n) : Number(n).toFixed(2);
 }
 
+/* ═══════════════════════════════════════════
+   ROTATION GEOMETRY (baked at codegen time)
+   Rotation is a static per-element property, so we pre-rotate the geometry once
+   during generation — no per-frame trig in the emitted Lua. Everything rotates
+   around the element's bounding-box CENTER, matching the canvas preview.
+═══════════════════════════════════════════ */
+// Rotate point (x,y) by `deg` degrees around (cx,cy). Returns [x, y] floats.
+function rotateAround(x, y, cx, cy, deg) {
+  if (!deg) return [x, y];
+  const r = deg * Math.PI / 180, s = Math.sin(r), c = Math.cos(r);
+  const dx = x - cx, dy = y - cy;
+  return [cx + dx * c - dy * s, cy + dx * s + dy * c];
+}
+// Triangle's three vertices (top-center, bottom-left, bottom-right), rotated
+// around the bbox center. `b` is the world-space bounds.
+function triPoints(el, b) {
+  const cx = b.x + b.w / 2, cy = b.y + b.h / 2, deg = el.rotation || 0;
+  return [
+    rotateAround(b.x + b.w / 2, b.y,         cx, cy, deg),
+    rotateAround(b.x,           b.y + b.h,    cx, cy, deg),
+    rotateAround(b.x + b.w,     b.y + b.h,    cx, cy, deg),
+  ];
+}
+// Square's four corners (TL, TR, BR, BL), rotated around the bbox center.
+function quadCorners(el, b) {
+  const cx = b.x + b.w / 2, cy = b.y + b.h / 2, deg = el.rotation || 0;
+  return [
+    rotateAround(b.x,         b.y,         cx, cy, deg),
+    rotateAround(b.x + b.w,   b.y,         cx, cy, deg),
+    rotateAround(b.x + b.w,   b.y + b.h,   cx, cy, deg),
+    rotateAround(b.x,         b.y + b.h,   cx, cy, deg),
+  ];
+}
+// True when this Square should render as a rotated quad rather than a Square.
+function isRotatedSquare(el) {
+  return el.type === 'Square' && !!el.rotation;
+}
+
 // Wrap a dynamic-Dropdown options expression so the user can paste either a
 // single Lua expression (e.g. `Players:GetPlayers()`) or a statement block
 // that returns a sequence (e.g. `local t={} for _,p in … do t[#t+1]=p.Name end
@@ -556,7 +594,9 @@ function genLua() {
   const v2p        = (x, y) => centerOn
     ? `_OFF + Vector2.new(${Math.round(x)}, ${Math.round(y)})`
     : v2(x, y);
-  const hasDrag    = sorted.some(e => e.type === 'Square' && e.draggable);
+  // Rotated squares render as a Polyline quad (no Position/Size), so they can't
+  // be draggable — the drag hit-test reads .Position/.Size. Exclude them here.
+  const hasDrag    = sorted.some(e => e.type === 'Square' && e.draggable && !e.rotation);
   const hasCB      = sorted.some(e => e.type === 'Checkbox');
   const hasKB      = sorted.some(e => e.type === 'Keybind');
   const hasDD      = sorted.some(e => e.type === 'Dropdown');
@@ -569,7 +609,7 @@ function genLua() {
   const hasRuntimeText  = dynTextEls.some(e => e.dynamicSource === 'runtime');
   const needsInteractive = hasDrag || hasCB || hasKB || hasDD || hasSL || hasBT || hasSW;
   const needsInput      = needsInteractive || hasDynText;
-  const draggables  = sorted.filter(e => e.type === 'Square' && e.draggable);
+  const draggables  = sorted.filter(e => e.type === 'Square' && e.draggable && !e.rotation);
   // DestroyUI: any Button/Keybind with action='DestroyUI' needs the connection
   // tracking infrastructure and a _DestroyUI() helper.
   const needsDestroy = sorted.some(e =>
@@ -777,7 +817,9 @@ function genLua() {
         L.push(`E.${v}Enabled = ${!!el.defaultEnabled}`);
         break;
       default:
-        L.push(`E.${v} = Drawing.new("${el.type}")`);
+        // A rotated Square has no native rotation in Severe's Drawing API, so it's
+        // rendered as a 4-corner Polyline (filled or outline) instead of a Square.
+        L.push(`E.${v} = Drawing.new("${isRotatedSquare(el) ? 'Polyline' : el.type}")`);
     }
   }
 
@@ -899,15 +941,29 @@ function genLua() {
     switch (el.type) {
 
       case 'Square':
-        L.push(`    E.${v}.Position  = ${v2p(b.x, b.y)}`);
-        L.push(`    E.${v}.Size      = ${v2(el.w, el.h)}`);
-        L.push(`    E.${v}.Color     = ${c3(el.color)}`);
-        L.push(`    E.${v}.Opacity   = ${fn(el.opacity ?? 1)}`);
-        L.push(`    E.${v}.Filled    = ${!!el.filled}`);
-        L.push(`    E.${v}.Thickness = ${fn(el.thickness || 1)}`);
-        if (el.rounding) L.push(`    E.${v}.Rounding  = ${el.rounding}`);
-        L.push(`    E.${v}.ZIndex    = ${safeZ}`);
-        L.push(`    E.${v}.Visible   = ${!!el.visible}`);
+        if (isRotatedSquare(el)) {
+          // Rendered as a closed 4-corner Polyline (Filled mirrors el.filled).
+          // Rounding is dropped — Polyline has no corner radius.
+          const c   = quadCorners(el, b);
+          const pts = [...c, c[0]].map(p => v2p(p[0], p[1])).join(', ');
+          L.push(`    E.${v}.Points    = { ${pts} }`);
+          L.push(`    E.${v}.Color     = ${c3(el.color)}`);
+          L.push(`    E.${v}.Opacity   = ${fn(el.opacity ?? 1)}`);
+          L.push(`    E.${v}.Filled    = ${!!el.filled}`);
+          L.push(`    E.${v}.Thickness = ${fn(el.thickness || 1)}`);
+          L.push(`    E.${v}.ZIndex    = ${safeZ}`);
+          L.push(`    E.${v}.Visible   = ${!!el.visible}`);
+        } else {
+          L.push(`    E.${v}.Position  = ${v2p(b.x, b.y)}`);
+          L.push(`    E.${v}.Size      = ${v2(el.w, el.h)}`);
+          L.push(`    E.${v}.Color     = ${c3(el.color)}`);
+          L.push(`    E.${v}.Opacity   = ${fn(el.opacity ?? 1)}`);
+          L.push(`    E.${v}.Filled    = ${!!el.filled}`);
+          L.push(`    E.${v}.Thickness = ${fn(el.thickness || 1)}`);
+          if (el.rounding) L.push(`    E.${v}.Rounding  = ${el.rounding}`);
+          L.push(`    E.${v}.ZIndex    = ${safeZ}`);
+          L.push(`    E.${v}.Visible   = ${!!el.visible}`);
+        }
         break;
 
       case 'Circle':
@@ -939,10 +995,13 @@ function genLua() {
         break;
       }
 
-      case 'Triangle':
-        L.push(`    E.${v}.PointA    = ${v2p(b.x + b.w/2, b.y)}`);
-        L.push(`    E.${v}.PointB    = ${v2p(b.x, b.y + b.h)}`);
-        L.push(`    E.${v}.PointC    = ${v2p(b.x + b.w, b.y + b.h)}`);
+      case 'Triangle': {
+        // triPoints returns the same 3 vertices as before when rotation == 0,
+        // so unrotated triangles stay byte-identical.
+        const tp = triPoints(el, b);
+        L.push(`    E.${v}.PointA    = ${v2p(tp[0][0], tp[0][1])}`);
+        L.push(`    E.${v}.PointB    = ${v2p(tp[1][0], tp[1][1])}`);
+        L.push(`    E.${v}.PointC    = ${v2p(tp[2][0], tp[2][1])}`);
         L.push(`    E.${v}.Color     = ${c3(el.color)}`);
         L.push(`    E.${v}.Opacity   = ${fn(el.opacity ?? 1)}`);
         L.push(`    E.${v}.Filled    = ${!!el.filled}`);
@@ -950,6 +1009,7 @@ function genLua() {
         L.push(`    E.${v}.ZIndex    = ${safeZ}`);
         L.push(`    E.${v}.Visible   = ${!!el.visible}`);
         break;
+      }
 
       case 'Line':
         L.push(`    E.${v}.From      = ${v2p(b.wx1, b.wy1)}`);
@@ -2075,9 +2135,11 @@ function genLua() {
           const ocy = Math.round(kb.cy) - Math.round(b.y);
           L.push(`            E.${kv}.Position = NewPos + Vector2.new(${ocx}, ${ocy})`);
         } else if (kid.type === 'Triangle') {
-          L.push(`            E.${kv}.PointA = NewPos + Vector2.new(${ox + Math.round(kid.w / 2)}, ${oy})`);
-          L.push(`            E.${kv}.PointB = NewPos + Vector2.new(${ox}, ${oy + kid.h})`);
-          L.push(`            E.${kv}.PointC = NewPos + Vector2.new(${ox + kid.w}, ${oy + kid.h})`);
+          // Rotated points relative to parent top-left (same as unrotated when rot==0).
+          const tp = triPoints(kid, kb);
+          L.push(`            E.${kv}.PointA = NewPos + Vector2.new(${Math.round(tp[0][0] - b.x)}, ${Math.round(tp[0][1] - b.y)})`);
+          L.push(`            E.${kv}.PointB = NewPos + Vector2.new(${Math.round(tp[1][0] - b.x)}, ${Math.round(tp[1][1] - b.y)})`);
+          L.push(`            E.${kv}.PointC = NewPos + Vector2.new(${Math.round(tp[2][0] - b.x)}, ${Math.round(tp[2][1] - b.y)})`);
         } else if (kid.type === 'Text') {
           // Centered text uses its anchor (kb.wx/wy), not the bbox left edge, as .Position.
           // Using ox/oy (which derive from kb.x = wx - tw/2) would drift centered labels
@@ -2086,16 +2148,29 @@ function genLua() {
           const ay = Math.round(kb.wy != null ? kb.wy : kb.y) - Math.round(b.y);
           L.push(`            E.${kv}.Position = NewPos + Vector2.new(${ax}, ${ay})`);
         } else if (kid.type === 'Line') {
+          // Offsets MUST track each endpoint relative to the parent's top-left —
+          // NOT the bbox corner (ox/oy). Using the bbox corner distorts any line
+          // whose endpoints aren't already in top-left→bottom-right order, because
+          // From/To then get pinned to min(x)/min(y) instead of the real points.
           const kb2 = bounds(kid);
-          const dx2 = Math.round(kb2.wx2) - Math.round(kb2.wx1);
-          const dy2 = Math.round(kb2.wy2) - Math.round(kb2.wy1);
-          L.push(`            E.${kv}.From = NewPos + Vector2.new(${ox}, ${oy})`);
-          L.push(`            E.${kv}.To   = NewPos + Vector2.new(${ox + dx2}, ${oy + dy2})`);
+          const fx = Math.round(kb2.wx1) - Math.round(b.x);
+          const fy = Math.round(kb2.wy1) - Math.round(b.y);
+          const tx = Math.round(kb2.wx2) - Math.round(b.x);
+          const ty = Math.round(kb2.wy2) - Math.round(b.y);
+          L.push(`            E.${kv}.From = NewPos + Vector2.new(${fx}, ${fy})`);
+          L.push(`            E.${kv}.To   = NewPos + Vector2.new(${tx}, ${ty})`);
         } else if (kid.type === 'Polyline') {
           const kb2 = bounds(kid);
-          const dx2 = Math.round(kb2.wx2) - Math.round(kb2.wx1);
-          const dy2 = Math.round(kb2.wy2) - Math.round(kb2.wy1);
-          L.push(`            E.${kv}.Points = { NewPos + Vector2.new(${ox}, ${oy}), NewPos + Vector2.new(${ox + dx2}, ${oy + dy2}) }`);
+          const fx = Math.round(kb2.wx1) - Math.round(b.x);
+          const fy = Math.round(kb2.wy1) - Math.round(b.y);
+          const tx = Math.round(kb2.wx2) - Math.round(b.x);
+          const ty = Math.round(kb2.wy2) - Math.round(b.y);
+          L.push(`            E.${kv}.Points = { NewPos + Vector2.new(${fx}, ${fy}), NewPos + Vector2.new(${tx}, ${ty}) }`);
+        } else if (isRotatedSquare(kid)) {
+          // Rotated square child renders as a Polyline quad — move its 4 corners.
+          const c   = quadCorners(kid, kb);
+          const pts = [...c, c[0]].map(p => `NewPos + Vector2.new(${Math.round(p[0] - b.x)}, ${Math.round(p[1] - b.y)})`).join(', ');
+          L.push(`            E.${kv}.Points = { ${pts} }`);
         } else {
           L.push(`            E.${kv}.Position = NewPos + Vector2.new(${ox}, ${oy})`);
         }
@@ -2131,7 +2206,8 @@ function genLuaImmediate() {
   const designH  = (typeof CV !== 'undefined' && CV.height) ? CV.height : 1080;
 
   // ── flags (mirrors genLua) ───────────────────────────────────
-  const hasDrag    = sorted.some(e => e.type === 'Square' && e.draggable);
+  // Rotated squares render as a quad (no Position/Size) → never draggable.
+  const hasDrag    = sorted.some(e => e.type === 'Square' && e.draggable && !e.rotation);
   const hasCB      = sorted.some(e => e.type === 'Checkbox');
   const hasKB      = sorted.some(e => e.type === 'Keybind');
   const hasDD      = sorted.some(e => e.type === 'Dropdown');
@@ -2144,7 +2220,7 @@ function genLuaImmediate() {
   const hasRuntimeText = dynTextEls.some(e => e.dynamicSource === 'runtime');
   const needsInteractive = hasDrag || hasCB || hasKB || hasDD || hasSL || hasBT || hasSW;
   const needsInput     = needsInteractive || hasDynText;
-  const draggables     = sorted.filter(e => e.type === 'Square' && e.draggable);
+  const draggables     = sorted.filter(e => e.type === 'Square' && e.draggable && !e.rotation);
   const multiTab       = S.tabs.length > 1;
   const tabIdx         = el => Math.max(1, S.tabs.findIndex(t => t.id === el.tabId) + 1 || 1);
   const hasSwitchTabAction = sorted.some(e =>
@@ -2263,9 +2339,21 @@ function genLuaImmediate() {
     switch (el.type) {
       case 'Square':
         getC(el.color, v);
-        getV(el.w, el.h, v);
-        if (el.filled) preRoundV(el.w, el.h, el.rounding || 0, v);
-        if (!idc && !el.draggable) getP(b.x, b.y, v);
+        if (isRotatedSquare(el)) {
+          // Rotated square draws as a quad — cache its 4 rotated corners (when not
+          // a drag child; drag children compute corners from the parent each frame).
+          if (!idc) {
+            const c = quadCorners(el, b);
+            getP(c[0][0], c[0][1], v + 'Q0');
+            getP(c[1][0], c[1][1], v + 'Q1');
+            getP(c[2][0], c[2][1], v + 'Q2');
+            getP(c[3][0], c[3][1], v + 'Q3');
+          }
+        } else {
+          getV(el.w, el.h, v);
+          if (el.filled) preRoundV(el.w, el.h, el.rounding || 0, v);
+          if (!idc && !el.draggable) getP(b.x, b.y, v);
+        }
         break;
       case 'Circle':
         getC(el.color, v);
@@ -2276,14 +2364,17 @@ function genLuaImmediate() {
         if (el.outline && el.outlineColor) getC(el.outlineColor, v + 'Out');
         if (!idc) getP(b.wx !== undefined ? b.wx : b.x, b.wy !== undefined ? b.wy : b.y, v);
         break;
-      case 'Triangle':
+      case 'Triangle': {
         getC(el.color, v);
         if (!idc) {
-          getP(b.x + b.w / 2, b.y,       v + 'A');
-          getP(b.x,           b.y + b.h,  v + 'B');
-          getP(b.x + b.w,     b.y + b.h,  v + 'C');
+          // triPoints == original vertices when rotation == 0 (byte-identical keys).
+          const tp = triPoints(el, b);
+          getP(tp[0][0], tp[0][1], v + 'A');
+          getP(tp[1][0], tp[1][1], v + 'B');
+          getP(tp[2][0], tp[2][1], v + 'C');
         }
         break;
+      }
       case 'Line':
         getC(el.color, v);
         if (!idc) { getP(b.wx1, b.wy1, v + 'A'); getP(b.wx2, b.wy2, v + 'B'); }
@@ -3280,6 +3371,27 @@ function genLuaImmediate() {
       switch (el.type) {
         case 'Square': {
           const cName = cachedColors.get(el.color) || getC(el.color, v);
+          if (isRotatedSquare(el)) {
+            // Rotated square = quad. Filled → 2 FilledTriangles; outline → closed
+            // Polyline. Corners come from cached _Q0..3 (static) or parent pos (child).
+            const c = quadCorners(el, b);
+            let ce;
+            if (isDragChild(el)) {
+              const par = dragParent(el); const pb = bounds(par); const lv = `_q${v}`;
+              L.push(`${ind}local ${lv}: Vector2 = E.${vn(par)}Pos`);
+              ce = c.map(p => `${lv} + Vector2.new(${Math.round(p[0] - pb.x)}, ${Math.round(p[1] - pb.y)})`);
+            } else {
+              ce = c.map(p => cachedV2Pos.get(`${Math.round(p[0])},${Math.round(p[1])}`));
+            }
+            const o = fn(el.opacity ?? 1);
+            if (el.filled) {
+              L.push(`${ind}DI_FTriangle(${ce[0]}, ${ce[1]}, ${ce[2]}, ${cName}, ${o})`);
+              L.push(`${ind}DI_FTriangle(${ce[0]}, ${ce[2]}, ${ce[3]}, ${cName}, ${o})`);
+            } else {
+              L.push(`${ind}DI_Polyline({ ${ce[0]}, ${ce[1]}, ${ce[2]}, ${ce[3]}, ${ce[0]} }, ${cName}, ${o}, ${fn(el.thickness || 1)})`);
+            }
+            break;
+          }
           const sName = cachedV2Sizes.get(`${Math.round(el.w)},${Math.round(el.h)}`);
           const rp    = renderPos(el);
           const pExpr = rp.isLocal ? (() => { const lv = `_p${v}`; L.push(`${ind}local ${lv}: Vector2 = ${rp.expr}`); return lv; })() : rp.expr;
@@ -3304,18 +3416,20 @@ function genLuaImmediate() {
         }
         case 'Triangle': {
           const cName = cachedColors.get(el.color);
+          // triPoints == original vertices when rotation == 0 (byte-identical).
+          const tp = triPoints(el, b);
           let pA, pB, pC;
           if (isDragChild(el)) {
             const par = dragParent(el); const pb = bounds(par); const pv = vn(par);
             const lv = `_p${v}`;
             L.push(`${ind}local ${lv}: Vector2 = E.${pv}Pos`);
-            pA = `${lv} + Vector2.new(${Math.round(b.x + b.w/2 - pb.x)}, ${Math.round(b.y - pb.y)})`;
-            pB = `${lv} + Vector2.new(${Math.round(b.x - pb.x)}, ${Math.round(b.y + b.h - pb.y)})`;
-            pC = `${lv} + Vector2.new(${Math.round(b.x + b.w - pb.x)}, ${Math.round(b.y + b.h - pb.y)})`;
+            pA = `${lv} + Vector2.new(${Math.round(tp[0][0] - pb.x)}, ${Math.round(tp[0][1] - pb.y)})`;
+            pB = `${lv} + Vector2.new(${Math.round(tp[1][0] - pb.x)}, ${Math.round(tp[1][1] - pb.y)})`;
+            pC = `${lv} + Vector2.new(${Math.round(tp[2][0] - pb.x)}, ${Math.round(tp[2][1] - pb.y)})`;
           } else {
-            pA = cachedV2Pos.get(`${Math.round(b.x + b.w/2)},${Math.round(b.y)}`);
-            pB = cachedV2Pos.get(`${Math.round(b.x)},${Math.round(b.y + b.h)}`);
-            pC = cachedV2Pos.get(`${Math.round(b.x + b.w)},${Math.round(b.y + b.h)}`);
+            pA = cachedV2Pos.get(`${Math.round(tp[0][0])},${Math.round(tp[0][1])}`);
+            pB = cachedV2Pos.get(`${Math.round(tp[1][0])},${Math.round(tp[1][1])}`);
+            pC = cachedV2Pos.get(`${Math.round(tp[2][0])},${Math.round(tp[2][1])}`);
           }
           if (el.filled) {
             L.push(`${ind}DI_FTriangle(${pA}, ${pB}, ${pC}, ${cName}, ${fn(el.opacity ?? 1)})`);

@@ -162,8 +162,8 @@ function doSnapResize(el, dir) {
       for (const [edge, a] of edgesToCheck) {
         for (const r of [ob.x, ob.x + ob.w]) {
           if (Math.abs(a - r) < DIST) {
-            if (edge === 'e') { el.w = Math.max(8, el.w + (r - a)); }
-            else              { const newX = r; const newW = Math.max(8, (b.x + b.w) - newX); el.x = (b.x + b.w) - newW; el.w = newW; }
+            if (edge === 'e') { el.w = Math.max(1, el.w + (r - a)); }
+            else              { const newX = r; const newW = Math.max(1, (b.x + b.w) - newX); el.x = (b.x + b.w) - newW; el.w = newW; }
             snaps.push({ x: r, refY: ob.y + ob.h / 2 });
             snappedX = true;
             break;
@@ -179,8 +179,8 @@ function doSnapResize(el, dir) {
       for (const [edge, a] of edgesToCheck) {
         for (const r of [ob.y, ob.y + ob.h]) {
           if (Math.abs(a - r) < DIST) {
-            if (edge === 's') { el.h = Math.max(8, el.h + (r - a)); }
-            else              { const newY = r; const newH = Math.max(8, (b.y + b.h) - newY); el.y = (b.y + b.h) - newH; el.h = newH; }
+            if (edge === 's') { el.h = Math.max(1, el.h + (r - a)); }
+            else              { const newY = r; const newH = Math.max(1, (b.y + b.h) - newY); el.y = (b.y + b.h) - newH; el.h = newH; }
             snaps.push({ y: r, refX: ob.x + ob.w / 2 });
             snappedY = true;
             break;
@@ -387,7 +387,7 @@ document.addEventListener('mousemove', e => {
       }
 
       if (el.type === 'Circle') {
-        el.radius = Math.max(4, s.radius + Math.max(ddx, ddy) / 2);
+        el.radius = Math.max(1, s.radius + Math.max(ddx, ddy) / 2);
       } else if (el.type === 'Line' || el.type === 'Polyline') {
         if (dir.includes('nw') || dir.includes('w') || dir.includes('sw')) {
           el.x1 = s.x1 + ddx; el.y1 = s.y1 + ddy;
@@ -395,18 +395,18 @@ document.addEventListener('mousemove', e => {
           el.x2 = s.x2 + ddx; el.y2 = s.y2 + ddy;
         }
       } else {
-        // Clamp width/height at 8 px; mirror the position shift by how much
-        // the dimension ACTUALLY shrank — not by the raw delta — so the
-        // element doesn't slide past its own minimum edge.
-        if (dir.includes('e'))  el.w  = Math.max(8, s.w  + ddx);
-        if (dir.includes('s'))  el.h  = Math.max(8, s.h  + ddy);
+        // Clamp width/height at 1 px (tiny shapes are allowed — e.g. eyes/dots);
+        // mirror the position shift by how much the dimension ACTUALLY shrank —
+        // not by the raw delta — so the element doesn't slide past its own edge.
+        if (dir.includes('e'))  el.w  = Math.max(1, s.w  + ddx);
+        if (dir.includes('s'))  el.h  = Math.max(1, s.h  + ddy);
         if (dir.includes('w')) {
-          const newW = Math.max(8, s.w - ddx);
+          const newW = Math.max(1, s.w - ddx);
           el.x = s.x + (s.w - newW);
           el.w = newW;
         }
         if (dir.includes('n')) {
-          const newH = Math.max(8, s.h - ddy);
+          const newH = Math.max(1, s.h - ddy);
           el.y = s.y + (s.h - newH);
           el.h = newH;
         }

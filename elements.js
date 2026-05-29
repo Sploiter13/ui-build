@@ -23,7 +23,7 @@ function mkEl(type, x, y) {
   switch (type) {
     case 'Square':
       return { ...base, x, y, w: 160, h: 60,
-        color: '#ffffff', thickness: 1, filled: true, rounding: 0, draggable: false };
+        color: '#ffffff', thickness: 1, filled: true, rounding: 0, draggable: false, rotation: 0 };
 
     case 'Circle':
       return { ...base, x, y, radius: 50,
@@ -37,7 +37,7 @@ function mkEl(type, x, y) {
 
     case 'Triangle':
       return { ...base, x, y, w: 90, h: 70,
-        color: '#ffffff', thickness: 1, filled: false };
+        color: '#ffffff', thickness: 1, filled: false, rotation: 0 };
 
     case 'Line':
       return { ...base, x1: x, y1: y, x2: x + 120, y2: y,

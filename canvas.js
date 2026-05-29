@@ -142,13 +142,25 @@ function render() {
     ctx.globalAlpha = el.opacity ?? 1;
     const b = bounds(el);
 
+    // Rotation (Square/Triangle): rotate the shape draw around its bbox center.
+    // Wrapped inside this save/restore so selection handles + snap guides drawn
+    // after restore() stay axis-aligned (matching the axis-aligned hit-test).
+    if (el.rotation) {
+      const rcx = b.x + b.w / 2, rcy = b.y + b.h / 2;
+      ctx.translate(rcx, rcy);
+      ctx.rotate(el.rotation * Math.PI / 180);
+      ctx.translate(-rcx, -rcy);
+    }
+
     switch (el.type) {
 
       case 'Square':
         ctx.strokeStyle = rgba(el.color);
         ctx.fillStyle   = rgba(el.color);
         ctx.lineWidth   = el.thickness || 1;
-        rrect(b.x, b.y, b.w, b.h, el.rounding || 0);
+        // Rotated squares export as a sharp-cornered quad (rounding isn't
+        // expressible on the Polyline/Quad), so preview them sharp too.
+        rrect(b.x, b.y, b.w, b.h, el.rotation ? 0 : (el.rounding || 0));
         el.filled ? ctx.fill() : ctx.stroke();
         if (el.draggable) {
           ctx.save();
