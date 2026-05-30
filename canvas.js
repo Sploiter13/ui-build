@@ -387,7 +387,7 @@ function render() {
           ctx.clip();
           ctx.drawImage(el._img, b.x, b.y, b.w, b.h);
           // tint overlay using the button color (mirrors DI_Image tint behavior)
-          ctx.globalAlpha = 0.35;
+          ctx.globalAlpha = (el.opacity ?? 1) * 0.35;
           ctx.fillStyle = rgba(el.color);
           ctx.fillRect(b.x, b.y, b.w, b.h);
           ctx.restore();
@@ -398,9 +398,10 @@ function render() {
           rrect(b.x, b.y, b.w, b.h, el.rounding || 0);
           el.filled ? ctx.fill() : ctx.stroke();
         }
-        // subtle highlight strip
+        // subtle highlight strip — scaled by element opacity so an opacity-0
+        // button is fully invisible in the preview (not just its fill).
         ctx.save();
-        ctx.globalAlpha = 0.25;
+        ctx.globalAlpha = (el.opacity ?? 1) * 0.25;
         ctx.fillStyle   = '#ffffff';
         rrect(b.x + 2, b.y + 2, b.w - 4, Math.min(8, b.h / 3), Math.max(0, (el.rounding || 0) - 1));
         ctx.fill();

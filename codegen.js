@@ -39,6 +39,7 @@ function restoreSnap(snap) {
 function undo() {
   if (!S.hist.length) return;
   _codeDirty = true;
+  _spBurstKey = null;   // end any property-edit burst so the next edit snapshots fresh
   S.fut.push(ser());
   restoreSnap(S.hist.pop());
   S.els.filter(elNeedsImg).forEach(loadImg);
@@ -52,6 +53,7 @@ function undo() {
 function redo() {
   if (!S.fut.length) return;
   _codeDirty = true;
+  _spBurstKey = null;
   S.hist.push(ser());
   restoreSnap(S.fut.pop());
   S.els.filter(elNeedsImg).forEach(loadImg);
@@ -916,17 +918,19 @@ function genLua() {
   // ── init block ───────────────────────────────────────────────
   L.push('do');
 
-  // Resolve safeZ recursively up the parent chain so grandchildren always render
-  // ABOVE their ancestors (fixes invisible widgets when a mid-hierarchy node has
-  // a lower zIndex than its descendants).
+  // A child sits just above its parent BY DEFAULT, but a child explicitly given a
+  // LOWER zIndex than its parent is respected and drops behind it (e.g. z = -10000
+  // sends a square to the back instead of being force-bumped to parent.z + 1, the
+  // old bug). Mirrors sortedEls() so the canvas preview and the emitted .ZIndex agree.
   const _zCache = new Map();
   const resolvedZ = (e) => {
     if (_zCache.has(e.id)) return _zCache.get(e.id);
-    if (!e.parentId) { const z = e.zIndex || 0; _zCache.set(e.id, z); return z; }
+    const ez = e.zIndex || 0;
+    if (!e.parentId) { _zCache.set(e.id, ez); return ez; }
     const par = S.els.find(x => x.id === e.parentId);
-    if (!par) { const z = e.zIndex || 0; _zCache.set(e.id, z); return z; }
-    const pz = resolvedZ(par);
-    const z  = Math.max(e.zIndex || 0, pz + 1);
+    if (!par) { _zCache.set(e.id, ez); return ez; }
+    _zCache.set(e.id, ez);
+    const z = (ez < (par.zIndex || 0)) ? ez : Math.max(ez, resolvedZ(par) + 1);
     _zCache.set(e.id, z);
     return z;
   };
@@ -1282,6 +1286,15 @@ function genLua() {
         L.push(`    E.${v}Label.Visible      = ${!!el.visible}`);
         break;
       }
+    }
+
+    // Apply opacity to compound widgets (plain shapes already set it inline above).
+    // Hit-testing uses Position/Size, never opacity — so an opacity-0 widget is
+    // fully invisible yet still clickable: the clean way to make an invisible
+    // hotspot, instead of visible=false (which can't be interacted with).
+    const _opFields = staticDrawingFields(el);
+    if (_opFields && (el.opacity ?? 1) !== 1) {
+      for (const _f of _opFields) L.push(`    E.${v}${_f}.Opacity = ${fn(el.opacity)}`);
     }
   }
 

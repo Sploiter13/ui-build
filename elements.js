@@ -183,26 +183,42 @@ function bounds(el) {
    RENDER ORDER
 ═══════════════════════════════════════════ */
 function sortedEls() {
-  // Resolve effective zIndex: a child is always ≥ parent's resolved z + 1, so a parent
-  // with a lower zIndex than its descendants never draws on top of them.
-  const _zCache = new Map();
+  // Effective draw order. A child sits just above its parent BY DEFAULT (so a
+  // checkbox placed in a window is visible), but a child explicitly given a lower
+  // zIndex than its parent is respected and drops behind it. This is the fix for
+  // "a square sent to z = -10000 still covered everything": the old rule bumped
+  // EVERY child to parent.z + 1 unconditionally, overriding explicit low z and
+  // collapsing siblings onto the same layer (the uneven over/under seen when a
+  // container went semi-transparent).
+  const zCache = new Map();
   const resolveZ = (e) => {
-    if (_zCache.has(e.id)) return _zCache.get(e.id);
-    if (!e.parentId) { const z = e.zIndex || 0; _zCache.set(e.id, z); return z; }
+    if (zCache.has(e.id)) return zCache.get(e.id);
+    const ez = e.zIndex || 0;
+    if (!e.parentId) { zCache.set(e.id, ez); return ez; }
     const par = S.els.find(x => x.id === e.parentId);
-    if (!par) { const z = e.zIndex || 0; _zCache.set(e.id, z); return z; }
-    // Temporary sentinel to guard against cycles
-    _zCache.set(e.id, e.zIndex || 0);
-    const pz = resolveZ(par);
-    const z  = Math.max(e.zIndex || 0, pz + 1);
-    _zCache.set(e.id, z);
+    if (!par) { zCache.set(e.id, ez); return ez; }
+    zCache.set(e.id, ez);                                  // cycle sentinel
+    const z = (ez < (par.zIndex || 0)) ? ez                // explicit "behind parent"
+            : Math.max(ez, resolveZ(par) + 1);             // default: above parent
+    zCache.set(e.id, z);
     return z;
+  };
+  const depthCache = new Map();
+  const depth = (e) => {
+    if (depthCache.has(e.id)) return depthCache.get(e.id);
+    if (!e.parentId) { depthCache.set(e.id, 0); return 0; }
+    const par = S.els.find(x => x.id === e.parentId);
+    if (!par) { depthCache.set(e.id, 0); return 0; }
+    depthCache.set(e.id, 0);
+    const d = depth(par) + 1;
+    depthCache.set(e.id, d);
+    return d;
   };
   return [...S.els].sort((a, b) => {
     const dz = resolveZ(a) - resolveZ(b);
     if (dz) return dz;
-    if (a.parentId === b.id) return  1;
-    if (b.parentId === a.id) return -1;
+    const dd = depth(a) - depth(b);     // ties: descendant drawn on top of ancestor
+    if (dd) return dd;
     return 0;
   });
 }
@@ -241,6 +257,7 @@ function minZ() { return S.els.reduce((m, e) => Math.min(m, e.zIndex || 0), 0); 
 function bZ(id, d) {
   const el = S.els.find(e => e.id === id);
   if (!el) return;
+  pushH();   // layer-order buttons are undoable
   if      (d ===  999) el.zIndex = maxZ() + 1;
   else if (d === -999) el.zIndex = minZ() - 1;
   else                 el.zIndex = (el.zIndex || 0) + d;
@@ -252,9 +269,21 @@ function bZ(id, d) {
 /* ═══════════════════════════════════════════
    PROPERTY SETTER  (called from props panel)
 ═══════════════════════════════════════════ */
+// Edit-burst tracking so property changes are undoable WITHOUT flooding history:
+// a continuous drag (opacity slider, colour picker) coalesces into one undo step,
+// while distinct edits — or edits after a short pause — each get their own step.
+let _spBurstKey = null;
+let _spBurstTime = 0;
+
 function sp(id, k, v) {
   const el = S.els.find(e => e.id === id);
   if (!el) return;
+  // Snapshot the pre-edit state once per burst (before mutating) so Ctrl+Z reverts it.
+  const now = Date.now();
+  const burstKey = id + ' ' + k;
+  if (burstKey !== _spBurstKey || (now - _spBurstTime) > 600) pushH();
+  _spBurstKey  = burstKey;
+  _spBurstTime = now;
   el[k] = v;
   _codeDirty = true;
   if (k === 'url' && el.type === 'Image') loadImg(el);
@@ -273,36 +302,75 @@ function sp(id, k, v) {
   updateProps();
 }
 
-function spPar(id, val) {
-  const el = S.els.find(e => e.id === id);
-  if (!el) return;
-  pushH();
-  if (val) {
-    const par = S.els.find(e => e.id === val);
-    if (!par) return;
-    const ob = bounds(el), pb = bounds(par);
-    if (el.type === 'Line' || el.type === 'Polyline') {
-      el.x1 = Math.round(ob.wx1 - pb.x);
-      el.y1 = Math.round(ob.wy1 - pb.y);
-      el.x2 = Math.round(ob.wx2 - pb.x);
-      el.y2 = Math.round(ob.wy2 - pb.y);
-    } else {
-      el.x = Math.round(ob.x - pb.x);
-      el.y = Math.round(ob.y - pb.y);
-    }
-    el.parentId = val;
-  } else if (el.parentId) {
-    const ob = bounds(el);
-    if (el.type === 'Line' || el.type === 'Polyline') {
-      el.x1 = Math.round(ob.wx1); el.y1 = Math.round(ob.wy1);
-      el.x2 = Math.round(ob.wx2); el.y2 = Math.round(ob.wy2);
-    } else {
-      el.x = Math.round(ob.x);
-      el.y = Math.round(ob.y);
-    }
-    el.parentId = null;
+/* ═══════════════════════════════════════════
+   RE-PARENTING  (world position preserved)
+═══════════════════════════════════════════ */
+// Re-parent every id in `ids` to `newParentId` (or null to unparent) WITHOUT
+// moving anything on screen. Each type's coords mean a different anchor, so we
+// snapshot the correct world anchor (circle CENTER, text ANCHOR, line ENDPOINTS,
+// everything else TOP-LEFT) and re-express it relative to the new parent. Using
+// bounds().x/y for circles/text was the old bug that shifted them on reparent.
+// Returns how many elements were actually reparented. Caller handles pushH/render.
+function reparentKeepWorld(ids, newParentId) {
+  // Snapshot world anchors BEFORE touching any parentId — reparenting one element
+  // changes the resolved bounds of its descendants.
+  const snap = new Map();
+  for (const eid of ids) {
+    const el = S.els.find(e => e.id === eid);
+    if (!el) continue;
+    const b = bounds(el);
+    if (el.type === 'Line' || el.type === 'Polyline')
+      snap.set(eid, { line: true, wx1: b.wx1, wy1: b.wy1, wx2: b.wx2, wy2: b.wy2 });
+    else if (el.type === 'Circle')
+      snap.set(eid, { wx: b.cx, wy: b.cy });                          // el.x/y = center
+    else if (el.type === 'Text')
+      snap.set(eid, { wx: b.wx != null ? b.wx : b.x,                  // el.x/y = anchor
+                      wy: b.wy != null ? b.wy : b.y });
+    else
+      snap.set(eid, { wx: b.x, wy: b.y });                            // el.x/y = top-left
   }
+
+  const np = newParentId ? S.els.find(e => e.id === newParentId) : null;
+  const nb = np ? bounds(np) : { x: 0, y: 0 };
+
+  // True if parenting `childId` under `targetId` would form a cycle (target is the
+  // child itself or one of its descendants).
+  const wouldCycle = (childId, targetId) => {
+    let cur = targetId;
+    while (cur) {
+      if (cur === childId) return true;
+      const p = S.els.find(e => e.id === cur);
+      cur = p ? p.parentId : null;
+    }
+    return false;
+  };
+
+  let n = 0;
+  for (const eid of ids) {
+    const el = S.els.find(e => e.id === eid);
+    const s  = snap.get(eid);
+    if (!el || !s) continue;
+    if (newParentId && (eid === newParentId || wouldCycle(eid, newParentId))) continue;
+    el.parentId = newParentId || null;
+    if (s.line) {
+      el.x1 = Math.round(s.wx1 - nb.x); el.y1 = Math.round(s.wy1 - nb.y);
+      el.x2 = Math.round(s.wx2 - nb.x); el.y2 = Math.round(s.wy2 - nb.y);
+    } else {
+      el.x = Math.round(s.wx - nb.x); el.y = Math.round(s.wy - nb.y);
+    }
+    n++;
+  }
+  return n;
+}
+
+function spPar(id, val) {
+  // The panel shows one element, but the user expects the WHOLE selection to
+  // reparent. If the panel element is part of the selection, apply to all of it.
+  const ids = (S.sel && S.sel.has(id)) ? Array.from(S.sel) : [id];
+  pushH();
+  reparentKeepWorld(ids, val || null);
   updateLayers();
   render();
   updateProps();
+  if (typeof updateCallbacks === 'function') updateCallbacks();
 }

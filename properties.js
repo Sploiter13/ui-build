@@ -282,15 +282,17 @@ function onLayerDrop(srcId, dstId, mode) {
 
   pushH();
 
+  // reparentKeepWorld re-expresses coords so the element doesn't jump on screen
+  // when its parent changes (it has its own cycle guard too).
   if (mode === 'root') {
-    src.parentId = null;
+    reparentKeepWorld([srcId], null);
   } else if (mode === 'inside') {
-    src.parentId = dstId;
+    reparentKeepWorld([srcId], dstId);
   } else if (mode === 'above' || mode === 'below') {
     const dst = S.els.find(e => e.id === dstId);
     if (!dst) return;
-    // Move src next to dst in the same parent group
-    src.parentId = dst.parentId || null;
+    // Move src next to dst in the same parent group (world position preserved).
+    reparentKeepWorld([srcId], dst.parentId || null);
     // zIndex adjustment: 'above' in UI = higher zIndex (on top), 'below' = lower
     // Layers panel sorts desc (highest first at top), so 'above' = higher z.
     const delta = mode === 'above' ? 1 : -1;

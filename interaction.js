@@ -475,21 +475,9 @@ function ctxDo(a) {
     const sq = S.els.find(e => S.sel.has(e.id) && e.type === 'Square');
     if (!sq) { toast('Need a Square selected'); return; }
     pushH();
-    let n = 0;
-    for (const id of S.sel) {
-      const el = S.els.find(e => e.id === id);
-      if (!el || el.id === sq.id) continue;
-      const ob = bounds(el), pb = bounds(sq);
-      if (el.type === 'Line' || el.type === 'Polyline') {
-        el.x1 = Math.round(ob.wx1 - pb.x); el.y1 = Math.round(ob.wy1 - pb.y);
-        el.x2 = Math.round(ob.wx2 - pb.x); el.y2 = Math.round(ob.wy2 - pb.y);
-      } else {
-        el.x = Math.round(ob.x - pb.x);
-        el.y = Math.round(ob.y - pb.y);
-      }
-      el.parentId = sq.id;
-      n++;
-    }
+    // Parent every other selected element to the Square, world position preserved.
+    const ids = Array.from(S.sel).filter(i => i !== sq.id);
+    const n = reparentKeepWorld(ids, sq.id);
     toast(`Parented ${n} to ${sq.name}`);
     updateLayers(); updateProps(); updateCallbacks(); render();
     return;
@@ -497,19 +485,7 @@ function ctxDo(a) {
 
   if (a === 'unparent') {
     pushH();
-    for (const id of S.sel) {
-      const el = S.els.find(e => e.id === id);
-      if (!el || !el.parentId) continue;
-      const ob = bounds(el);
-      if (el.type === 'Line' || el.type === 'Polyline') {
-        el.x1 = Math.round(ob.wx1); el.y1 = Math.round(ob.wy1);
-        el.x2 = Math.round(ob.wx2); el.y2 = Math.round(ob.wy2);
-      } else {
-        el.x = Math.round(ob.x);
-        el.y = Math.round(ob.y);
-      }
-      el.parentId = null;
-    }
+    reparentKeepWorld(Array.from(S.sel), null);
     updateLayers(); updateProps(); updateCallbacks(); render();
     toast('Unparented');
     return;
