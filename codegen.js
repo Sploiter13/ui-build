@@ -8,6 +8,7 @@ function ser() {
     tabs:        S.tabs,
     activeTab:   S.activeTab,
     drawingMode: S.drawingMode,
+    anim:        S.anim,
     sel:         Array.from(S.sel),
     els: S.els.map(e => {
       const c = { ...e };
@@ -31,6 +32,7 @@ function restoreSnap(snap) {
   S.tabs        = d.tabs      || [{ id: 'tab1', name: 'Tab 1' }];
   S.activeTab   = d.activeTab || S.tabs[0].id;
   S.drawingMode = d.drawingMode || 'static';
+  S.anim        = normalizeAnim(d.anim);
   // Restore selection (filter out ids that no longer exist — safe against
   // redo past a delete).  Older snapshots without `sel` yield an empty set.
   S.sel = new Set(Array.isArray(d.sel) ? d.sel.filter(id => S.els.some(e => e.id === id)) : []);
@@ -116,6 +118,58 @@ function saveJSON() {
   toast('Saved!');
 }
 
+// Sanitise externally-loaded elements so a hand-edited or legacy save can never
+// emit NaN coordinates. Circles whose centre was stored as cx/cy (an old/manual
+// format) are migrated to x/y, and every coordinate is coerced to a finite number.
+function normalizeEls(els) {
+  if (!Array.isArray(els)) return [];
+  const num = (v, d) => (typeof v === 'number' && isFinite(v)) ? v
+    : (typeof v === 'string' && v.trim() !== '' && isFinite(Number(v))) ? Number(v) : d;
+  for (const el of els) {
+    if (!el || typeof el !== 'object') continue;
+    if (el.type === 'Circle') {
+      if (el.x == null && el.cx != null) el.x = el.cx;
+      if (el.y == null && el.cy != null) el.y = el.cy;
+      delete el.cx; delete el.cy;
+    }
+    if (el.type === 'Line' || el.type === 'Polyline') {
+      el.x1 = num(el.x1, 0); el.y1 = num(el.y1, 0);
+      el.x2 = num(el.x2, 0); el.y2 = num(el.y2, 0);
+    } else {
+      el.x = num(el.x, 0); el.y = num(el.y, 0);
+    }
+    el.anim = normalizeElAnim(el.anim);
+  }
+  return els;
+}
+
+// Merge a (possibly partial / legacy) global animation config onto the defaults,
+// clamping numbers. Always returns a complete, safe S.anim object.
+function normalizeAnim(a) {
+  const d = defaultAnim();
+  if (a && typeof a === 'object') {
+    if (typeof a.speed === 'number' && isFinite(a.speed))         d.speed     = Math.max(0.1, Math.min(4, a.speed));
+    if (typeof a.intensity === 'number' && isFinite(a.intensity)) d.intensity = Math.max(0, Math.min(3, a.intensity));
+    d.reducedMotion = a.reducedMotion === true;
+    if (typeof a.tabTransition === 'string') d.tabTransition = a.tabTransition;
+  }
+  return d;
+}
+
+// Merge a per-element animation config onto the defaults. Unknown effect names are
+// kept as-is (the codegen treats anything without a recipe as 'none' → no code).
+function normalizeElAnim(a) {
+  const d = defaultElAnim();
+  if (a && typeof a === 'object') {
+    for (const k of ['entrance','exit','hover','click','toggle','ambient','easing']) {
+      if (typeof a[k] === 'string' && a[k]) d[k] = a[k];
+    }
+    if (typeof a.duration === 'number' && isFinite(a.duration))   d.duration  = Math.max(0, Math.min(10, a.duration));
+    if (typeof a.intensity === 'number' && isFinite(a.intensity)) d.intensity = Math.max(0, Math.min(3, a.intensity));
+  }
+  return d;
+}
+
 function loadJSON(ev) {
   const f = ev.target.files[0];
   if (!f) return;
@@ -124,10 +178,11 @@ function loadJSON(ev) {
     try {
       const d = JSON.parse(e.target.result);
       pushH();
-      S.els         = d.elements || [];
+      S.els         = normalizeEls(d.elements || []);
       S.tabs        = d.tabs      || [{ id: 'tab1', name: 'Tab 1' }];
       S.activeTab   = d.activeTab || S.tabs[0].id;
       S.drawingMode = d.drawingMode || 'static';
+      S.anim        = normalizeAnim(d.anim);
       S.sel.clear();
       rebuildCnt();
       if (d.w) { document.getElementById('icw').value = d.w; CV.width  = d.w; }
@@ -149,10 +204,11 @@ try {
   const s = localStorage.getItem('sevui4');
   if (s) {
     const d = JSON.parse(s);
-    S.els         = d.els || d;   // support old flat format
+    S.els         = normalizeEls(d.els || d);   // support old flat format
     S.tabs        = d.tabs      || [{ id: 'tab1', name: 'Tab 1' }];
     S.activeTab   = d.activeTab || S.tabs[0].id;
     S.drawingMode = d.drawingMode || 'static';
+    S.anim        = normalizeAnim(d.anim);
     rebuildCnt();
     S.els.filter(elNeedsImg).forEach(loadImg);
   }
@@ -825,6 +881,30 @@ function genLua() {
     }
   }
 
+  // ── Animation (static): whole-UI slide entrance. Reuses the window drag-reposition
+  //    routine — while the entrance plays, NewPos comes from the eased offset instead
+  //    of the mouse. Gated: zero output unless enabled AND a draggable root has a slide.
+  const _animOn   = (typeof SETTINGS !== 'undefined') && SETTINGS.animExperimental;
+  const _animRoot = _animOn ? sorted.find(e => !e.parentId) : null;
+  const _SL_DIR = { slideInTop: [0, -1], slideInBottom: [0, 1], slideInLeft: [-1, 0], slideInRight: [1, 0] };
+  const _rootEnt = (_animRoot && _animRoot.anim) ? _animRoot.anim.entrance : 'none';
+  const _slDir   = _SL_DIR[_rootEnt];
+  const _rootDraggable = !!_animRoot && draggables.some(d => d.id === _animRoot.id);
+  const _animSlide = _animOn && !!_slDir && _rootDraggable;                                   // slide entrance
+  const _animFade  = _animOn && (_rootEnt === 'fadeIn' || _rootEnt === 'fadeSoftIn') && _rootDraggable; // fade entrance
+  const _animFx    = _animSlide || _animFade;
+  let _slGx = 0, _slGy = 0, _slInv = 0;
+  if (_animFx) {
+    const gi   = (S.anim && S.anim.intensity) || 1;
+    const ei   = (_animRoot.anim.intensity != null) ? _animRoot.anim.intensity : 1;
+    const dist = 40 * gi * ei;
+    const spd  = (S.anim && S.anim.speed) || 1;
+    const dur  = ((_animRoot.anim.duration > 0) ? _animRoot.anim.duration : 0.30) / spd;
+    _slGx  = Math.round((_slDir ? _slDir[0] : 0) * dist);
+    _slGy  = Math.round((_slDir ? _slDir[1] : 0) * dist);
+    _slInv = +(1 / Math.max(0.001, dur)).toFixed(4);
+  }
+
   if (hasDrag) {
     L.push('');
     for (const el of draggables) {
@@ -833,6 +913,11 @@ function genLua() {
       L.push(`E.${v}DragStartMouse = Vector2.new(0, 0)`);
       L.push(`E.${v}DragStartPos   = Vector2.new(0, 0)`);
     }
+  }
+  if (_animFx) {
+    L.push(`@native local function _eOut(t: number): number local u: number = 1 - t return 1 - u * u * u end`);
+    L.push(`E._UIAt = os.clock()      -- entrance clock (slide / fade)`);
+    L.push(`E._slideDone = false`);
   }
   L.push('');
 
@@ -930,7 +1015,7 @@ function genLua() {
     const par = S.els.find(x => x.id === e.parentId);
     if (!par) { _zCache.set(e.id, ez); return ez; }
     _zCache.set(e.id, ez);
-    const z = (ez < (par.zIndex || 0)) ? ez : Math.max(ez, resolvedZ(par) + 1);
+    const z = (ez < (par.zIndex || 0)) ? ez : resolvedZ(par) + 1 + Math.max(0, ez);
     _zCache.set(e.id, z);
     return z;
   };
@@ -1629,6 +1714,7 @@ function genLua() {
         if (isTogUI) {
           // ToggleUI runs inline in PreLocal — it must affect render-visibility this frame.
           L.push(`                UIVisible = not UIVisible`);
+          if (_animFx) L.push(`                if UIVisible then E._UIAt = os.clock() E._slideDone = false end  -- replay entrance on open`);
           emitStaticVis(16);
           if (needsSetTab) L.push(`                if UIVisible then SetTab(ActiveTab) end`);
         } else if (isDestroyUI) {
@@ -1944,6 +2030,58 @@ function genLua() {
       L.push('');
     }
 
+    // Whole-UI fade entrance: ease every object's opacity in, then settle + stop.
+    if (_animFade) {
+      // Mirror of emitStaticVis for opacity — Opacity = RESTING × alpha so alpha=1
+      // restores the exact init opacity. Slider track's dimmed 0.3 is the special case.
+      const emitStaticOpacity = (indent, alphaExpr) => {
+        const p = ' '.repeat(indent);
+        for (const se of sorted) {
+          const sv = vn(se);
+          const bo = se.opacity ?? 1;
+          const o  = (val) => `${fn(val)} * ${alphaExpr}`;
+          switch (se.type) {
+            case 'Checkbox':
+              L.push(`${p}E.${sv}Background.Opacity = ${o(bo)}`);
+              L.push(`${p}E.${sv}Label.Opacity      = ${o(bo)}`);
+              break;
+            case 'Keybind':
+              L.push(`${p}E.${sv}Background.Opacity = ${o(bo)}`);
+              L.push(`${p}E.${sv}Text.Opacity       = ${o(bo)}`);
+              break;
+            case 'Dropdown':
+              L.push(`${p}E.${sv}Background.Opacity = ${o(bo)}`);
+              L.push(`${p}E.${sv}Text.Opacity       = ${o(bo)}`);
+              L.push(`${p}E.${sv}Arrow.Opacity      = ${o(bo)}`);
+              break;
+            case 'Slider':
+              L.push(`${p}E.${sv}Track.Opacity = ${o(bo * 0.3)}`);
+              L.push(`${p}E.${sv}Fill.Opacity  = ${o(bo)}`);
+              L.push(`${p}E.${sv}Knob.Opacity  = ${o(bo)}`);
+              L.push(`${p}E.${sv}Label.Opacity = ${o(bo)}`);
+              break;
+            case 'Button':
+              L.push(`${p}E.${sv}Background.Opacity = ${o(bo)}`);
+              L.push(`${p}E.${sv}Text.Opacity       = ${o(bo)}`);
+              break;
+            case 'Switch':
+              L.push(`${p}E.${sv}Track.Opacity = ${o(bo)}`);
+              L.push(`${p}E.${sv}Knob.Opacity  = ${o(bo)}`);
+              L.push(`${p}E.${sv}Label.Opacity = ${o(bo)}`);
+              break;
+            default:
+              L.push(`${p}E.${sv}.Opacity = ${o(bo)}`);
+          }
+        }
+      };
+      L.push(`        if not E._slideDone then`);
+      L.push(`            local _ga: number = _eOut(math.clamp((os.clock() - E._UIAt) * ${_slInv}, 0, 1))`);
+      emitStaticOpacity(12, '_ga');
+      L.push(`            if _ga >= 1 then E._slideDone = true end`);
+      L.push(`        end`);
+      L.push('');
+    }
+
     for (const el of sorted.filter(e => e.type === 'Checkbox')) {
       const v  = vn(el);
       const ti = tabIdx(el);
@@ -2097,9 +2235,21 @@ function genLua() {
         }
       }
 
-      L.push(`        if E.${v}DragActive then`);
-      L.push(`            local NewPos: Vector2 = E.${v}DragStartPos + (Mouse - E.${v}DragStartMouse)`);
-      L.push(`            E.${v}.Position = NewPos`);
+      const _isAnimRoot = _animSlide && el.id === _animRoot.id;
+      if (_isAnimRoot) {
+        // Drag OR entrance drives NewPos; the existing child-reposition below then
+        // moves the whole UI together. Settles (and stops) once the slide finishes.
+        const _winBase = v2p(b.x, b.y);
+        L.push(`        if E.${v}DragActive or not E._slideDone then`);
+        L.push(`            local _slot: number = 1 - _eOut(math.clamp((os.clock() - E._UIAt) * ${_slInv}, 0, 1))`);
+        L.push(`            local NewPos: Vector2 = if E.${v}DragActive then E.${v}DragStartPos + (Mouse - E.${v}DragStartMouse) else ${_winBase} + Vector2.new(${_slGx} * _slot, ${_slGy} * _slot)`);
+        L.push(`            if not E.${v}DragActive and _slot <= 0 then E._slideDone = true end`);
+        L.push(`            E.${v}.Position = NewPos`);
+      } else {
+        L.push(`        if E.${v}DragActive then`);
+        L.push(`            local NewPos: Vector2 = E.${v}DragStartPos + (Mouse - E.${v}DragStartMouse)`);
+        L.push(`            E.${v}.Position = NewPos`);
+      }
 
       for (const kid of allKids) {
         const kv = vn(kid);
@@ -2445,6 +2595,7 @@ function genLuaImmediate() {
         getV(el.w, el.h,            v + 'Tk');
         getV(10, el.h + 4,          v + 'Kn');
         preRoundV(el.w, el.h, el.rounding || 0, v + 'Sl');
+        preRoundV(10, el.h + 4, 2, v + 'SlKn');
         if (!idc) {
           getP(b.x, b.y, v + 'Tk');
           getP(b.x + Math.round(el.w / 2), b.y - 16, v + 'Lb');
@@ -2608,6 +2759,8 @@ function genLuaImmediate() {
       }
       case 'Checkbox':
         L.push(`E.${v}Checked = ${!!el.defaultChecked}`);
+        if (SETTINGS.animExperimental && el.anim && el.anim.toggle && el.anim.toggle !== 'none')
+          L.push(`E.${v}ChkA = ${el.defaultChecked ? 1 : 0}`);   // eased tick alpha
         break;
       case 'Keybind': {
         const kbAct = el.action || 'CustomFunction';
@@ -2701,8 +2854,49 @@ function genLuaImmediate() {
     L.push('');
   }
 
+  // ── Animation detection (Phase 1: whole-UI open/close — fade + slide). Computed
+  //    here so the init block + the UIVisible toggle can stamp E._UIAt. Zero output
+  //    unless the experimental flag is on AND the root has a supported entrance.
+  //    Each channel is applied only when the effect uses it: slide → `_aoff` on
+  //    positions, fade → `_amul` on opacities. (Scale effects land in the next pass.)
+  const _animOn   = (typeof SETTINGS !== 'undefined') && SETTINGS.animExperimental;
+  const _animRoot = _animOn ? sorted.find(e => !e.parentId) : null;
+  const _UI_FX = {
+    fadeIn:        { f: 1, sx: 0,  sy: 0  },
+    fadeSoftIn:    { f: 1, sx: 0,  sy: 0  },
+    slideInTop:    { f: 0, sx: 0,  sy: -1 },
+    slideInBottom: { f: 0, sx: 0,  sy: 1  },
+    slideInLeft:   { f: 0, sx: -1, sy: 0  },
+    slideInRight:  { f: 0, sx: 1,  sy: 0  },
+  };
+  const _rootEnt = (_animRoot && _animRoot.anim) ? _animRoot.anim.entrance : 'none';
+  const _rec     = _UI_FX[_rootEnt];
+  const _animFx     = _animOn && !!_rec;
+  const _animOffset = _animFx && (_rec.sx !== 0 || _rec.sy !== 0);
+  const _animFade   = _animFx && _rec.f > 0;
+  const _animToggle = _animFx && hasToggleUI;       // open/close replay vs one-shot entrance
+  const _aoff = _animOffset ? ' + _GOff' : '';      // appended to positions that bypass renderPos (slide)
+  const _amul = _animFade   ? ' * _GA'   : '';      // appended to opacities (fade)
+  // Any per-widget micro-animation (switch slide / button glow / checkbox fade)?
+  const _anyWidgetAnim = _animOn && sorted.some(e => e.anim && (
+    (e.type === 'Button' && e.anim.hover && e.anim.hover !== 'none') ||
+    ((e.type === 'Switch' || e.type === 'Checkbox') && e.anim.toggle && e.anim.toggle !== 'none')));
+  let _slideGx = 0, _slideGy = 0, _slideInv = 0;
+  if (_animFx) {
+    const gi   = (S.anim && S.anim.intensity) || 1;
+    const ei   = (_animRoot.anim.intensity != null) ? _animRoot.anim.intensity : 1;
+    const dist = 40 * gi * ei;
+    const spd  = (S.anim && S.anim.speed) || 1;
+    const dur  = ((_animRoot.anim.duration > 0) ? _animRoot.anim.duration : 0.30) / spd;
+    _slideGx  = Math.round(_rec.sx * dist);
+    _slideGy  = Math.round(_rec.sy * dist);
+    _slideInv = +(1 / Math.max(0.001, dur)).toFixed(4);
+  }
+
   // ── init block (minimal) ──────────────────────────────────────
   L.push('do');
+  if (_animToggle) L.push('    E._UIAt = os.clock()  -- open/close animation clock');
+  if (_anyWidgetAnim) L.push('    E._LastT = os.clock()  -- per-widget ease frame-time anchor');
   if (multiTab) L.push('    SetTab(1)');
   for (const el of sorted.filter(e => e.type === 'Slider')) {
     const v = vn(el);
@@ -2893,6 +3087,7 @@ function genLuaImmediate() {
         L.push(`            if ${tg}TableFind(Keys, E.${v}Key) and not TableFind(PrevKeys, E.${v}Key) then`);
         if (isTogUI) {
           L.push(`                UIVisible = not UIVisible`);
+          if (_animToggle) L.push(`                E._UIAt = os.clock()  -- restart the open/close animation`);
         } else if (isDestroyUI) {
           // DestroyUI: disconnect everything and stop. Idempotent.
           L.push(`                _DestroyUI()`);
@@ -3207,6 +3402,17 @@ function genLuaImmediate() {
       const slds = sorted.filter(e => e.type === 'Slider');
       const sws  = sorted.filter(e => e.type === 'Switch');
       if (btns.length || slds.length || sws.length) L.push('');
+      // Frame-rate-independent ease factor for the per-widget micro-animations
+      // (switch slide / button glow / checkbox fade). Derives a per-frame lerp
+      // factor from the REAL frame time so a ~0.2s effect looks identical at 60 Hz
+      // and 240 Hz (a fixed factor finished in a few ms on high-refresh displays).
+      if (_anyWidgetAnim) {
+        const _rate = +(14 * ((S.anim && S.anim.speed) || 1)).toFixed(2);
+        L.push(`        local _nowT: number = os.clock()`);
+        L.push(`        local _ef: number   = math.min((_nowT - E._LastT) * ${_rate}, 0.6)`);
+        L.push(`        E._LastT = _nowT`);
+        L.push('');
+      }
       for (const el of btns) {
         const v  = vn(el);
         const b  = bounds(el);
@@ -3242,7 +3448,13 @@ function genLuaImmediate() {
         } else {
           colorExpr = `if _ov then ${cHv} else ${cBg}`;
         }
-        L.push(`            E.${v}BgColor = ${colorExpr}`);
+        // Hover glow: ease the fill toward its target colour each frame (a smooth
+        // highlight) when the button opts in; otherwise snap (unchanged).
+        if (_animOn && el.anim && el.anim.hover === 'hoverGlow') {
+          L.push(`            E.${v}BgColor = E.${v}BgColor:Lerp((${colorExpr}), _ef)`);
+        } else {
+          L.push(`            E.${v}BgColor = ${colorExpr}`);
+        }
         L.push(`        end`);
       }
       for (const el of slds) {
@@ -3264,11 +3476,25 @@ function genLuaImmediate() {
         const swKnobSize = el.h - 4;
         const knobOn  = el.w - swKnobSize - 2;
         const knobOff = 2;
+        // Toggle animation: ease the knob toward its target each frame (a smooth
+        // slide) when the switch opts in; otherwise snap. Exponential smoothing —
+        // no timer, no allocation, settles on its own.
+        const _swAnim = _animOn && el.anim && el.anim.toggle && el.anim.toggle !== 'none';
         L.push(`        do`);
         L.push(`            local _en: boolean = E.${v}Enabled`);
         L.push(`            E.${v}TrackColor = if _en then ${cOn} else ${cOff}`);
-        L.push(`            E.${v}KnobX      = if _en then ${knobOn} else ${knobOff}`);
+        if (_swAnim) {
+          L.push(`            E.${v}KnobX      = E.${v}KnobX + ((if _en then ${knobOn} else ${knobOff}) - E.${v}KnobX) * _ef`);
+        } else {
+          L.push(`            E.${v}KnobX      = if _en then ${knobOn} else ${knobOff}`);
+        }
         L.push(`        end`);
+      }
+
+      // Checkbox toggle fade: ease the tick's alpha toward 0/1 each frame.
+      for (const el of sorted.filter(e => e.type === 'Checkbox' && _animOn && e.anim && e.anim.toggle && e.anim.toggle !== 'none')) {
+        const v   = vn(el);
+        L.push(`        E.${v}ChkA = E.${v}ChkA + ((if E.${v}Checked then 1 else 0) - E.${v}ChkA) * _ef`);
       }
     }
 
@@ -3289,18 +3515,50 @@ function genLuaImmediate() {
   // Severe rule: Render must only dispatch DrawingImmediate.* calls.
   // Hit-tests, Mouse reads, slider math, and color selection are all pre-computed in
   // PreLocal and cached in E.<name>Hover / E.<name>BgColor / E.<name>FillW / E.<name>DisplayText.
+  // ── Animation runtime: emit the easing + one-shot start clock just before _Render.
+  //    Detection consts (_animFx / _animOffset / _animFade / _aoff / _amul …) were
+  //    computed before the init block so the init + toggle sites can reference them.
+  if (_animFx) {
+    if (_animOffset) L.push('    local _AZero: Vector2 = Vector2.new(0, 0)');
+    L.push('    @native local function _eOut(t: number): number local u: number = 1 - t return 1 - u * u * u end');
+    if (!_animToggle) L.push('    local _T0: number = os.clock()  -- script-start clock for the one-shot entrance');
+    L.push('');
+  }
+
+  // _slot is 0 at rest → 1 fully out; the offset/fade channels are derived from it
+  // and emitted only when the effect actually uses each channel.
+  const _emitChannels = () => {
+    if (_animOffset) L.push(`        local _GOff: Vector2 = if _slot > 0 then Vector2.new(${_slideGx} * _slot, ${_slideGy} * _slot) else _AZero`);
+    if (_animFade)   L.push('        local _GA: number = 1 - _slot');
+  };
+
   L.push('    @native');
   L.push('    local function _Render(): ()');
     L.push('        if not isrbxactive() then return end  -- skip draw when unfocused');
-    if (hasToggleUI) {
-      L.push('        if not UIVisible then return end');
+    if (_animToggle) {
+      // Keep drawing through the close-out so the exit plays; bail only when fully hidden.
+      // _slot: on open eases 1→0 (in); on close eases 0→1 (out).
+      L.push(`        local _wt: number = math.clamp((os.clock() - E._UIAt) * ${_slideInv}, 0, 1)`);
+      L.push('        if not UIVisible and _wt >= 1 then return end  -- fully closed → stop drawing');
+      L.push('        local _slot: number = if UIVisible then 1 - _eOut(_wt) else _eOut(_wt)');
+      _emitChannels();
       L.push('');
+    } else {
+      if (hasToggleUI) {
+        L.push('        if not UIVisible then return end');
+        L.push('');
+      }
+      if (_animFx) {
+        L.push(`        local _slot: number = 1 - _eOut(math.clamp((os.clock() - _T0) * ${_slideInv}, 0, 1))`);
+        _emitChannels();
+        L.push('');
+      }
     }
 
     // Helper: resolve current position for an element in Render.
     // Text (and any widget using a center anchor) is cached by (b.wx, b.wy), not (b.x, b.y).
     // Keep the lookup key in sync with what `getP(...)` registered during the walk pass.
-    const renderPos = (el) => {
+    const _rpBase = (el) => {
       if (isDragChild(el)) {
         const par = dragParent(el);
         const b2  = bounds(el);
@@ -3321,6 +3579,11 @@ function genLuaImmediate() {
       const key = `${Math.round(kx)},${Math.round(ky)}`;
       return { expr: cachedV2Pos.get(key), isLocal: false };
     };
+    // When a whole-UI slide is active, append the per-frame offset at this single
+    // funnel point and force a local so `.X`/`.Y` access on the result stays valid.
+    const renderPos = _animOffset
+      ? (el) => { const r = _rpBase(el); return { expr: `${r.expr} + _GOff`, isLocal: true }; }
+      : _rpBase;
 
     const fontArg = (el) => {
       const fMap = { 0: 'nil', 1: '"Gotham"', 2: '"JetBrains Mono"', 3: '"Arial"', 4: '"SourceSans"' };
@@ -3338,7 +3601,8 @@ function genLuaImmediate() {
     // Call with rounding<=0 for a plain FilledRectangle.
     const emitFilledRect = (ind, posExpr, w, h, colorName, opacity, rounding, hintTag) => {
       const W = Math.round(w), H = Math.round(h);
-      const oStr = fn(opacity ?? 1);
+      const oStr = fn(opacity ?? 1) + _amul;   // fade channel — '' when not fading
+
       const sFull = getV(W, H, hintTag);
       if (!rounding || rounding <= 0) {
         L.push(`${ind}DI_FRect(${posExpr}, ${sFull}, ${colorName}, ${oStr})`);
@@ -3371,6 +3635,10 @@ function genLuaImmediate() {
       if (!fullPillW && !fullPillH)   L.push(`${ind}DI_FCircle(${posExpr} + Vector2.new(${W - r}, ${H - r}), ${r}, ${colorName}, ${oStr})`);
     };
 
+    // Widget labels honour each element's textOutline flag, exactly like static mode.
+    // (Forcing OutlinedText on everything made black-on-light text look bold/blurry.)
+    const txtFn = (e) => (e && e.textOutline) ? 'DI_OText' : 'DI_Text';
+
     // Emit draw calls in sorted order
     for (const el of sorted) {
       if (!el.visible) continue;   // permanently invisible — skip entirely
@@ -3392,11 +3660,11 @@ function genLuaImmediate() {
             if (isDragChild(el)) {
               const par = dragParent(el); const pb = bounds(par); const lv = `_q${v}`;
               L.push(`${ind}local ${lv}: Vector2 = E.${vn(par)}Pos`);
-              ce = c.map(p => `${lv} + Vector2.new(${Math.round(p[0] - pb.x)}, ${Math.round(p[1] - pb.y)})`);
+              ce = c.map(p => `${lv} + Vector2.new(${Math.round(p[0] - pb.x)}, ${Math.round(p[1] - pb.y)})${_aoff}`);
             } else {
-              ce = c.map(p => cachedV2Pos.get(`${Math.round(p[0])},${Math.round(p[1])}`));
+              ce = c.map(p => `${cachedV2Pos.get(`${Math.round(p[0])},${Math.round(p[1])}`)}${_aoff}`);
             }
-            const o = fn(el.opacity ?? 1);
+            const o = fn(el.opacity ?? 1) + _amul;   // rotated-square shares one opacity local
             if (el.filled) {
               L.push(`${ind}DI_FTriangle(${ce[0]}, ${ce[1]}, ${ce[2]}, ${cName}, ${o})`);
               L.push(`${ind}DI_FTriangle(${ce[0]}, ${ce[2]}, ${ce[3]}, ${cName}, ${o})`);
@@ -3411,7 +3679,7 @@ function genLuaImmediate() {
           if (el.filled) {
             emitFilledRect(ind, pExpr, el.w, el.h, cName, el.opacity ?? 1, el.rounding || 0, v);
           } else {
-            L.push(`${ind}DI_Rect(${pExpr}, ${sName}, ${cName}, ${fn(el.opacity ?? 1)}, ${fn(el.thickness || 1)})`);
+            L.push(`${ind}DI_Rect(${pExpr}, ${sName}, ${cName}, ${fn(el.opacity ?? 1)}${_amul}, ${fn(el.thickness || 1)})`);
           }
           break;
         }
@@ -3421,9 +3689,9 @@ function genLuaImmediate() {
             ? (() => { const par = dragParent(el); const pb = bounds(par); const lv = `_p${v}`; L.push(`${ind}local ${lv}: Vector2 = E.${vn(par)}Pos + Vector2.new(${Math.round(b.cx - pb.x)}, ${Math.round(b.cy - pb.y)})`); return lv; })()
             : cachedV2Pos.get(`${Math.round(b.cx)},${Math.round(b.cy)}`);
           if (el.filled) {
-            L.push(`${ind}DI_FCircle(${pName}, ${fn(el.radius)}, ${cName}, ${fn(el.opacity ?? 1)})`);
+            L.push(`${ind}DI_FCircle(${pName}${_aoff}, ${fn(el.radius)}, ${cName}, ${fn(el.opacity ?? 1)}${_amul})`);
           } else {
-            L.push(`${ind}DI_Circle(${pName}, ${fn(el.radius)}, ${cName}, ${fn(el.opacity ?? 1)}, ${fn(el.thickness || 1)})`);
+            L.push(`${ind}DI_Circle(${pName}${_aoff}, ${fn(el.radius)}, ${cName}, ${fn(el.opacity ?? 1)}${_amul}, ${fn(el.thickness || 1)})`);
           }
           break;
         }
@@ -3445,9 +3713,9 @@ function genLuaImmediate() {
             pC = cachedV2Pos.get(`${Math.round(tp[2][0])},${Math.round(tp[2][1])}`);
           }
           if (el.filled) {
-            L.push(`${ind}DI_FTriangle(${pA}, ${pB}, ${pC}, ${cName}, ${fn(el.opacity ?? 1)})`);
+            L.push(`${ind}DI_FTriangle(${pA}${_aoff}, ${pB}${_aoff}, ${pC}${_aoff}, ${cName}, ${fn(el.opacity ?? 1)}${_amul})`);
           } else {
-            L.push(`${ind}DI_Triangle(${pA}, ${pB}, ${pC}, ${cName}, ${fn(el.opacity ?? 1)}, ${fn(el.thickness || 1)})`);
+            L.push(`${ind}DI_Triangle(${pA}${_aoff}, ${pB}${_aoff}, ${pC}${_aoff}, ${cName}, ${fn(el.opacity ?? 1)}${_amul}, ${fn(el.thickness || 1)})`);
           }
           break;
         }
@@ -3464,7 +3732,7 @@ function genLuaImmediate() {
             pA = cachedV2Pos.get(`${Math.round(b.wx1)},${Math.round(b.wy1)}`);
             pB = cachedV2Pos.get(`${Math.round(b.wx2)},${Math.round(b.wy2)}`);
           }
-          L.push(`${ind}DI_Line(${pA}, ${pB}, ${cName}, ${fn(el.opacity ?? 1)}, 1, ${fn(el.thickness || 1)})`);
+          L.push(`${ind}DI_Line(${pA}${_aoff}, ${pB}${_aoff}, ${cName}, ${fn(el.opacity ?? 1)}${_amul}, 1, ${fn(el.thickness || 1)})`);
           break;
         }
         case 'Polyline': {
@@ -3480,7 +3748,7 @@ function genLuaImmediate() {
             pA = cachedV2Pos.get(`${Math.round(b.wx1)},${Math.round(b.wy1)}`);
             pB = cachedV2Pos.get(`${Math.round(b.wx2)},${Math.round(b.wy2)}`);
           }
-          L.push(`${ind}DI_Polyline({ ${pA}, ${pB} }, ${cName}, ${fn(el.opacity ?? 1)}, ${fn(el.thickness || 1)})`);
+          L.push(`${ind}DI_Polyline({ ${pA}${_aoff}, ${pB}${_aoff} }, ${cName}, ${fn(el.opacity ?? 1)}${_amul}, ${fn(el.thickness || 1)})`);
           break;
         }
         case 'Text': {
@@ -3498,9 +3766,9 @@ function genLuaImmediate() {
           }
           const fn2 = fontArg(el);
           if (el.outline) {
-            L.push(`${ind}DI_OText(${pExpr}, ${el.size || 16}, ${cName}, ${fn(el.opacity ?? 1)}, ${textExpr}, ${el.center ? 'true' : 'false'}${fn2})`);
+            L.push(`${ind}DI_OText(${pExpr}, ${el.size || 16}, ${cName}, ${fn(el.opacity ?? 1)}${_amul}, ${textExpr}, ${el.center ? 'true' : 'false'}${fn2})`);
           } else {
-            L.push(`${ind}DI_Text(${pExpr}, ${el.size || 16}, ${cName}, ${fn(el.opacity ?? 1)}, ${textExpr}, ${el.center ? 'true' : 'false'}${fn2})`);
+            L.push(`${ind}DI_Text(${pExpr}, ${el.size || 16}, ${cName}, ${fn(el.opacity ?? 1)}${_amul}, ${textExpr}, ${el.center ? 'true' : 'false'}${fn2})`);
           }
           break;
         }
@@ -3516,11 +3784,18 @@ function genLuaImmediate() {
           const lx    = Math.round(el.w + 6);
           const ly    = Math.round(el.h / 2 - (el.textSize || 16) / 2);
           const fn3   = fontArg({ font: el.font });
-          L.push(`${ind}DI_Rect(${pExpr}, ${sBg}, ${cBg}, ${fn(el.opacity ?? 1)}, ${fn(el.thickness || 1)})`);
-          L.push(`${ind}if E.${v}Checked then`);
-          L.push(`${ind}    DI_FRect(${pExpr} + Vector2.new(${pad}, ${pad}), ${sFl}, ${cFl}, 1)`);
-          L.push(`${ind}end`);
-          L.push(`${ind}DI_OText(${pExpr} + Vector2.new(${lx}, ${ly}), ${el.textSize || 16}, ${cLb}, ${fn(el.opacity ?? 1)}, "${(el.label || 'Checkbox').replace(/"/g, '\\"')}", false${fn3})`);
+          L.push(`${ind}DI_FRect(${pExpr}, ${sBg}, ${cBg}, ${fn(el.opacity ?? 1)}${_amul})`);   // filled box (matches static + canvas)
+          if (_animOn && el.anim && el.anim.toggle && el.anim.toggle !== 'none') {
+            // Toggle fade: draw the tick at its eased alpha (skip when ~invisible).
+            L.push(`${ind}if E.${v}ChkA > 0.01 then`);
+            L.push(`${ind}    DI_FRect(${pExpr} + Vector2.new(${pad}, ${pad}), ${sFl}, ${cFl}, E.${v}ChkA${_amul})`);
+            L.push(`${ind}end`);
+          } else {
+            L.push(`${ind}if E.${v}Checked then`);
+            L.push(`${ind}    DI_FRect(${pExpr} + Vector2.new(${pad}, ${pad}), ${sFl}, ${cFl}, 1${_amul})`);
+            L.push(`${ind}end`);
+          }
+          L.push(`${ind}${txtFn(el)}(${pExpr} + Vector2.new(${lx}, ${ly}), ${el.textSize || 16}, ${cLb}, ${fn(el.opacity ?? 1)}${_amul}, "${(el.label || 'Checkbox').replace(/"/g, '\\"')}", false${fn3})`);
           break;
         }
         case 'Keybind': {
@@ -3533,7 +3808,7 @@ function genLuaImmediate() {
           const ty    = Math.round(el.h / 2 - (el.textSize || 16) / 2);
           const fn3   = fontArg({ font: el.font });
           emitFilledRect(ind, pExpr, el.w, el.h, cBg, el.opacity ?? 1, el.rounding || 0, v + 'Kb');
-          L.push(`${ind}DI_OText(${pExpr} + Vector2.new(${tx}, ${ty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, E.${v}DisplayText, true${fn3})`);
+          L.push(`${ind}${txtFn(el)}(${pExpr} + Vector2.new(${tx}, ${ty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}${_amul}, E.${v}DisplayText, true${fn3})`);
           break;
         }
         case 'Dropdown': {
@@ -3554,16 +3829,10 @@ function genLuaImmediate() {
           const lv      = `_dd${v}`;
           L.push(`${ind}local ${lv}: Vector2 = ${pExpr}`);
           emitFilledRect(ind, lv, el.w, el.h, cBg, el.opacity ?? 1, el.rounding || 0, v + 'Dd');
-          L.push(`${ind}DI_OText(${lv} + Vector2.new(${dtx}, ${dty}), ${tsz}, ${cTx}, ${fn(el.opacity ?? 1)}, DI_FitText(E.${v}Selected, ${tsz}, ${fnN}, ${maxHdrW}), false${fn3})`);
-          L.push(`${ind}DI_OText(${lv} + Vector2.new(${atx}, ${dty}), ${tsz}, ${cTx}, ${fn(el.opacity ?? 1)}, "v", false${fn3})`);
-          L.push(`${ind}if E.${v}Open then`);
-          const loopMax = isDynDD ? `E.${v}SlotCount` : `#E.${v}Options`;
-          L.push(`${ind}    for _i = 1, ${loopMax} do`);
-          L.push(`${ind}        local _oy: number = ${lv}.Y + ${el.h} * _i`);
-          L.push(`${ind}        DI_FRect(Vector2.new(${lv}.X, _oy), ${sBg}, ${cBg}, ${fn(el.opacity ?? 1)})`);
-          L.push(`${ind}        DI_OText(Vector2.new(${lv}.X + ${dtx}, _oy + ${dty}), ${tsz}, ${cTx}, ${fn(el.opacity ?? 1)}, DI_FitText(${isDynDD ? `tostring(E.${v}Options[_i] or "")` : `E.${v}Options[_i]`}, ${tsz}, ${fnN}, ${maxOptW}), false${fn3})`);
-          L.push(`${ind}    end`);
-          L.push(`${ind}end`);
+          L.push(`${ind}${txtFn(el)}(${lv} + Vector2.new(${dtx}, ${dty}), ${tsz}, ${cTx}, ${fn(el.opacity ?? 1)}${_amul}, DI_FitText(E.${v}Selected, ${tsz}, ${fnN}, ${maxHdrW}), false${fn3})`);
+          L.push(`${ind}DI_Text(${lv} + Vector2.new(${atx}, ${dty}), ${tsz}, ${cTx}, ${fn(el.opacity ?? 1)}${_amul}, "v", false${fn3})`);
+          // The open option list is drawn in a deferred pass AFTER the loop so it
+          // overlays the widgets below it instead of being covered by later draws.
           break;
         }
         case 'Slider': {
@@ -3571,18 +3840,16 @@ function genLuaImmediate() {
           const pExpr = rp.isLocal ? (() => { const lv = `_p${v}`; L.push(`${ind}local ${lv}: Vector2 = ${rp.expr}`); return lv; })() : rp.expr;
           const cTk   = cachedColors.get(el.color);
           const cKn   = cachedColors.get(el.knobColor || '#ffffff');
-          const cLb   = cachedColors.get(el.textColor || '#ffffff');
-          const sKn   = cachedV2Sizes.get(`10,${Math.round(el.h + 4)}`);
-          const fn3   = fontArg({ font: el.font });
           const lbx   = Math.round(el.w / 2);
           const lv    = `_sl${v}`;
           // _FW is pre-computed in PreLocal as E.${v}FillW — Render just reads it.
           L.push(`${ind}local ${lv}: Vector2 = ${pExpr}`);
           L.push(`${ind}local _FW: number    = E.${v}FillW`);
-          emitFilledRect(ind, lv, el.w, el.h, cTk, el.opacity ?? 1, el.rounding || 0, v + 'Sl');
-          L.push(`${ind}DI_FRect(${lv}, Vector2.new(_FW, ${el.h}), ${cKn}, ${fn(el.opacity ?? 1)})`);
-          L.push(`${ind}DI_FRect(Vector2.new(${lv}.X + _FW - 5, ${lv}.Y - 2), ${sKn}, ${cKn}, ${fn(el.opacity ?? 1)})`);
-          L.push(`${ind}DI_OText(${lv} + Vector2.new(${lbx}, -16), 14, ${cLb}, ${fn(el.opacity ?? 1)}, DI_FitText(E.${v}LabelText, 14, ${fontName({ font: el.font })}, ${Math.max(1, el.w)}), true${fn3})`);
+          emitFilledRect(ind, lv, el.w, el.h, cTk, (el.opacity ?? 1) * 0.3, el.rounding || 0, v + 'Sl');
+          L.push(`${ind}if _FW > 0 then DI_FRect(${lv}, Vector2.new(_FW, ${el.h}), ${cTk}, ${fn(el.opacity ?? 1)}${_amul}) end`);
+          L.push(`${ind}local _kn${v}: Vector2 = ${lv} + Vector2.new(_FW - 5, -2)`);
+          emitFilledRect(ind, `_kn${v}`, 10, el.h + 4, cKn, el.opacity ?? 1, 2, v + 'SlKn');
+          L.push(`${ind}DI_Text(${lv} + Vector2.new(${lbx}, -16), 11, ${cTk}, ${fn(el.opacity ?? 1)}${_amul}, DI_FitText(E.${v}LabelText, 11, nil, ${Math.max(1, el.w)}), true)`);
           break;
         }
         case 'Button': {
@@ -3605,14 +3872,14 @@ function genLuaImmediate() {
             const sBg = cachedV2Sizes.get(`${Math.round(el.w)},${Math.round(el.h)}`);
             const safeUrl = el.imageUrl.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
             L.push(`${ind}if DI_Image then`);
-            L.push(`${ind}    DI_Image("${safeUrl}", ${lv}, ${sBg}, E.${v}BgColor, ${fn(el.opacity ?? 1)}, false, ${el.rounding || 0})`);
+            L.push(`${ind}    DI_Image("${safeUrl}", ${lv}, ${sBg}, E.${v}BgColor, ${fn(el.opacity ?? 1)}${_amul}, false, ${el.rounding || 0})`);
             L.push(`${ind}else`);
             emitFilledRect(ind + '    ', lv, el.w, el.h, `E.${v}BgColor`, el.opacity ?? 1, el.rounding || 0, v + 'Bt');
             L.push(`${ind}end`);
           } else {
             emitFilledRect(ind, lv, el.w, el.h, `E.${v}BgColor`, el.opacity ?? 1, el.rounding || 0, v + 'Bt');
           }
-          L.push(`${ind}DI_OText(${lv} + Vector2.new(${tx}, ${ty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}, DI_FitText("${(el.label || 'Button').replace(/"/g, '\\"')}", ${el.textSize || 16}, ${fontName({ font: el.font })}, ${Math.max(1, el.w - 8)}), true${fn3})`);
+          L.push(`${ind}${txtFn(el)}(${lv} + Vector2.new(${tx}, ${ty}), ${el.textSize || 16}, ${cTx}, ${fn(el.opacity ?? 1)}${_amul}, DI_FitText("${(el.label || 'Button').replace(/"/g, '\\"')}", ${el.textSize || 16}, ${fontName({ font: el.font })}, ${Math.max(1, el.w - 8)}), true${fn3})`);
           break;
         }
         case 'Switch': {
@@ -3630,8 +3897,8 @@ function genLuaImmediate() {
           // TrackColor + KnobX precomputed in PreLocal — Render reads cached refs only.
           L.push(`${ind}local ${lv}: Vector2 = ${pExpr}`);
           emitFilledRect(ind, lv, el.w, el.h, `E.${v}TrackColor`, el.opacity ?? 1, rounding, v + 'SwTk');
-          L.push(`${ind}DI_FCircle(${lv} + Vector2.new(E.${v}KnobX + ${knobR}, ${2 + knobR}), ${knobR}, ${cKn}, ${fn(el.opacity ?? 1)})`);
-          L.push(`${ind}DI_OText(${lv} + Vector2.new(${lx}, ${ly}), ${el.textSize || 16}, ${cLb}, ${fn(el.opacity ?? 1)}, "${(el.label || 'Switch').replace(/"/g, '\\"')}", false${fn3})`);
+          L.push(`${ind}DI_FCircle(${lv} + Vector2.new(E.${v}KnobX + ${knobR}, ${2 + knobR}), ${knobR}, ${cKn}, ${fn(el.opacity ?? 1)}${_amul})`);
+          L.push(`${ind}${txtFn(el)}(${lv} + Vector2.new(${lx}, ${ly}), ${el.textSize || 16}, ${cLb}, ${fn(el.opacity ?? 1)}${_amul}, "${(el.label || 'Switch').replace(/"/g, '\\"')}", false${fn3})`);
           break;
         }
         case 'Image': {
@@ -3643,12 +3910,39 @@ function genLuaImmediate() {
           // Image source is an interned string literal — same identity each frame.
           // Guarded: skip silently if DrawingImmediate.Image is unavailable in this
           // build, so a missing builtin can't abort the rest of the Render.
-          L.push(`${ind}if DI_Image then DI_Image("${safeUrl}", ${pExpr}, ${sName}, ${cName}, ${fn(el.opacity ?? 1)}, ${!!el.gif}, ${el.rounding || 0}) end`);
+          L.push(`${ind}if DI_Image then DI_Image("${safeUrl}", ${pExpr}, ${sName}, ${cName}, ${fn(el.opacity ?? 1)}${_amul}, ${!!el.gif}, ${el.rounding || 0}) end`);
           break;
         }
       }
 
       if (tg) L.push('        end');
+    }
+
+    // ── Deferred: open dropdown lists draw LAST so they overlay the widgets below
+    //    them (buttons, etc.) instead of being covered by later-drawn elements.
+    for (const el of sorted.filter(e => e.type === 'Dropdown')) {
+      const v       = vn(el);
+      const cBg     = cachedColors.get(el.color);
+      const cTx     = cachedColors.get(el.textColor || '#ffffff');
+      const sBg     = cachedV2Sizes.get(`${Math.round(el.w)},${Math.round(el.h)}`);
+      const isDynDD = !!(el.dynamicOptions && el.dynamicOptions.trim());
+      const dtx     = 8;
+      const dty     = Math.round(el.h / 2 - (el.textSize || 16) / 2);
+      const fn3     = fontArg({ font: el.font });
+      const fnN     = fontName({ font: el.font });
+      const tsz     = el.textSize || 16;
+      const maxOptW = Math.max(1, el.w - 16);
+      const loopMax = isDynDD ? `E.${v}SlotCount` : `#E.${v}Options`;
+      const tg      = (multiTab && !el.shared) ? `ActiveTab == ${tabIdx(el)} and ` : '';
+      const rp      = renderPos(el);
+      L.push(`        if ${tg}E.${v}Open then`);
+      L.push(`            local _dd: Vector2 = ${rp.expr}`);
+      L.push(`            for _i = 1, ${loopMax} do`);
+      L.push(`                local _oy: number = _dd.Y + ${el.h} * _i`);
+      L.push(`                DI_FRect(Vector2.new(_dd.X, _oy), ${sBg}, ${cBg}, ${fn(el.opacity ?? 1)}${_amul})`);
+      L.push(`                DI_Text(Vector2.new(_dd.X + ${dtx}, _oy + ${dty}), ${tsz}, ${cTx}, ${fn(el.opacity ?? 1)}${_amul}, DI_FitText(${isDynDD ? `tostring(E.${v}Options[_i] or "")` : `E.${v}Options[_i]`}, ${tsz}, ${fnN}, ${maxOptW}), false${fn3})`);
+      L.push(`            end`);
+      L.push(`        end`);
     }
 
   L.push('    end');
@@ -3730,6 +4024,13 @@ function applySettings() {
   R.setProperty('--rw', SETTINGS.rightWidth + 'px');
   document.getElementById('left').style.width  = '';
   document.getElementById('right').style.width = '';
+
+  // Experimental AI Designer — reveal the titlebar button only when enabled.
+  const aiBtn = document.getElementById('ai-btn');
+  if (aiBtn) aiBtn.style.display = SETTINGS.aiExperimental ? '' : 'none';
+  if (typeof AI !== 'undefined') AI.enabled = !!SETTINGS.aiExperimental;
+  // If the feature is turned off while the modal is open, close it.
+  if (!SETTINGS.aiExperimental && typeof aiClose === 'function') aiClose();
 }
 
 function syncSettUI() {
@@ -3746,6 +4047,8 @@ function syncSettUI() {
   selOf('[onchange*="leftWidth"]',         SETTINGS.leftWidth);
   selOf('[onchange*="rightWidth"]',        SETTINGS.rightWidth);
   chkOf('[onchange*="centerOnViewport"]',  SETTINGS.centerOnViewport);
+  chkOf('[onchange*="aiExperimental"]',    SETTINGS.aiExperimental);
+  chkOf('[onchange*="animExperimental"]',  SETTINGS.animExperimental);
 
   const acc = document.getElementById('saccents');
   if (!acc) return;
@@ -3763,12 +4066,26 @@ function syncSettUI() {
 
 function setSett(key, val) {
   SETTINGS[key] = val;
-  // centerOnViewport changes the emitted Lua
-  if (key === 'centerOnViewport') _codeDirty = true;
+  // centerOnViewport and animExperimental both change the emitted Lua
+  if (key === 'centerOnViewport' || key === 'animExperimental') _codeDirty = true;
   saveSettings();
   applySettings();
   syncSettUI();
+  // Toggling the animation feature shows/hides the per-element Animation group.
+  if (key === 'animExperimental' && typeof updateProps === 'function') updateProps();
   if (typeof zFit === 'function') zFit();
+  render();
+}
+
+// Update one field of the document-level animation config (S.anim). These UI-wide
+// knobs are edited from the window/root element's property panel. Undoable.
+function setAnim(key, val) {
+  pushH();
+  if (!S.anim) S.anim = defaultAnim();
+  S.anim[key] = val;
+  S.anim = normalizeAnim(S.anim);
+  _codeDirty = true;
+  if (typeof updateProps === 'function') updateProps();
   render();
 }
 
@@ -3777,7 +4094,7 @@ function resetSett() {
     fontSize:12, font:'JetBrains Mono', compact:false,
     showGrid:true, gridSize:24, snapDist:7,
     leftWidth:192, rightWidth:250, accent:'blue',
-    centerOnViewport:false,
+    centerOnViewport:false, aiExperimental:false, animExperimental:false,
   });
   _codeDirty = true;
   saveSettings();

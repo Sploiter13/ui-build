@@ -16,6 +16,7 @@ function mkEl(type, x, y) {
     parentId: null,
     tabId:    S.activeTab,
     shared:   false,
+    anim:     defaultElAnim(),
   };
   x = Math.round(x);
   y = Math.round(y);
@@ -73,7 +74,7 @@ function mkEl(type, x, y) {
     case 'Dropdown':
       return { ...base, x, y, w: 150, h: 30,
         color: '#ffffff', rounding: 0, filled: true, thickness: 1,
-        options: 'Option 1,Option 2,Option 3', defaultIndex: 0,
+        options: 'Option 1,Option 2,Option 3', defaultIndex: 0, autoSelectDefault: false,
         dynamicOptions: '', maxOptions: 20,
         textSize: 16, textColor: '#000000', textOutline: true, font: 2,
         callback: 'Change', callbackBody: '' };
@@ -199,7 +200,7 @@ function sortedEls() {
     if (!par) { zCache.set(e.id, ez); return ez; }
     zCache.set(e.id, ez);                                  // cycle sentinel
     const z = (ez < (par.zIndex || 0)) ? ez                // explicit "behind parent"
-            : Math.max(ez, resolveZ(par) + 1);             // default: above parent
+            : resolveZ(par) + 1 + Math.max(0, ez);         // above parent; sibling z order preserved (no tie)
     zCache.set(e.id, z);
     return z;
   };
@@ -280,7 +281,7 @@ function sp(id, k, v) {
   if (!el) return;
   // Snapshot the pre-edit state once per burst (before mutating) so Ctrl+Z reverts it.
   const now = Date.now();
-  const burstKey = id + ' ' + k;
+  const burstKey = id + '\0' + k;
   if (burstKey !== _spBurstKey || (now - _spBurstTime) > 600) pushH();
   _spBurstKey  = burstKey;
   _spBurstTime = now;
@@ -298,6 +299,23 @@ function sp(id, k, v) {
       k === 'tabId' || k === 'shared') {
     if (typeof updateCallbacks === 'function') updateCallbacks();
   }
+  render();
+  updateProps();
+}
+
+// Set one field of an element's nested animation config (el.anim). Mirrors sp()'s
+// coalesced-burst history so dragging a number doesn't spam the undo stack.
+function spAnim(id, k, v) {
+  const el = S.els.find(e => e.id === id);
+  if (!el) return;
+  if (!el.anim) el.anim = defaultElAnim();
+  const now = Date.now();
+  const burstKey = id + '\0anim\0' + k;
+  if (burstKey !== _spBurstKey || (now - _spBurstTime) > 600) pushH();
+  _spBurstKey  = burstKey;
+  _spBurstTime = now;
+  el.anim[k] = v;
+  _codeDirty = true;
   render();
   updateProps();
 }

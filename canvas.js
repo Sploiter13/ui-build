@@ -344,7 +344,7 @@ function render() {
       }
 
       case 'Slider': {
-        ctx.fillStyle   = rgba(el.color, 0.2);
+        ctx.fillStyle   = rgba(el.color, 0.3);
         ctx.strokeStyle = rgba(el.color);
         ctx.lineWidth   = 1;
         rrect(b.x, b.y, b.w, b.h, el.rounding || 0);
@@ -363,10 +363,10 @@ function render() {
         rrect(kx - 5, b.y - 2, 10, b.h + 4, 2);
         ctx.fill();
         ctx.stroke();
-        ctx.font         = '10px "JetBrains Mono"';
+        ctx.font         = '11px "JetBrains Mono"';
         ctx.textBaseline = 'bottom';
         ctx.textAlign    = 'center';
-        ctx.fillStyle    = rgba('#ffffff', 0.7);
+        ctx.fillStyle    = rgba(el.color);
         // Trim floating-point noise: integer values print bare, fractional
         // values are rounded to 2 decimals with trailing zeros stripped.
         const _sv = el.curVal || 0;

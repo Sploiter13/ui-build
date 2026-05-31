@@ -280,8 +280,9 @@ CV.addEventListener('mousedown', e => {
           x1: e2.x1, y1: e2.y1, x2: e2.x2, y2: e2.y2,
         };
       }
-      drg = { type: 'resize', start: pos, handle: h, s0s, primaryId };
-      pushH();
+      // pushH deferred to the first actual pixel resized (mirrors 'move'), so a
+      // bare click on a handle never leaves a no-op entry on the undo stack.
+      drg = { type: 'resize', start: pos, handle: h, s0s, primaryId, pushed: false };
       return;
     }
   }
@@ -368,6 +369,13 @@ document.addEventListener('mousemove', e => {
     }
   } else if (drg.type === 'resize') {
     const dir = drg.handle.dir;
+    // Defer the history push past the click-vs-drag threshold so a bare handle
+    // click (no movement) never creates a no-op undo entry.
+    if (!drg.pushed) {
+      if (Math.abs(dx) <= 4 && Math.abs(dy) <= 4) return;
+      pushH();
+      drg.pushed = true;
+    }
     // Resize every non-locked selected element using its own start snapshot.
     for (const id of Object.keys(drg.s0s)) {
       const el = S.els.find(e => e.id === id);

@@ -71,6 +71,7 @@
   <button class="btn" onclick="showSett(event)" title="Settings">&#x2699;</button>
   <div class="vs"></div>
   <button class="btn g" onclick="genShow()">&#x27E8;/&#x27E9; Lua</button>
+  <button class="btn ai-btn" id="ai-btn" style="display:none" onclick="aiOpen()" title="AI Designer (beta)">&#x2726; AI</button>
   <div class="vs"></div>
   <button class="btn" onclick="undo()" title="Undo (Ctrl+Z)">&#x21A9;</button>
   <button class="btn" onclick="redo()" title="Redo (Ctrl+Y)">&#x21AA;</button>
@@ -272,6 +273,17 @@
   <div class="sg">ACCENT COLOR</div>
   <div class="saccents" id="saccents"></div>
 
+  <div class="sg">EXPERIMENTAL</div>
+  <div class="sr" title="Enable the AI Designer. Uses your own OpenRouter API key (kept only on this device, never exported)."><span class="sl">AI Designer <span style="color:var(--pur);font-size:8.5px;border:1px solid var(--pur);border-radius:3px;padding:0 3px;margin-left:3px">beta</span></span>
+    <input type="checkbox" class="si-chk" onchange="setSett('aiExperimental',this.checked)">
+  </div>
+  <div class="info pur" style="margin:0 12px 6px">Generate UIs from a prompt with your own AI key. Your key stays on this device and is sent only to the provider — never saved in projects.</div>
+
+  <div class="sr" title="Enable the Animation system — entrance/exit, hover, toggle, and window/tab transitions for the generated menu."><span class="sl">Animations <span style="color:var(--pur);font-size:8.5px;border:1px solid var(--pur);border-radius:3px;padding:0 3px;margin-left:3px">beta</span></span>
+    <input type="checkbox" class="si-chk" onchange="setSett('animExperimental',this.checked)">
+  </div>
+  <div class="info pur" style="margin:0 12px 6px">Smooth entrance/exit, hover, toggle and window/tab transitions. Off by default Configure each element's animation in its properties; the window's own entrance/exit and the UI-wide knobs live on the window element.</div>
+
   <div style="padding:10px 12px;border-top:1px solid var(--b);margin-top:4px">
     <button class="btn" style="width:100%;font-size:10px" onclick="resetSett()">Reset to Defaults</button>
   </div>
@@ -292,12 +304,26 @@
   </div>
 </div>
 
+<!-- ── AI DESIGNER MODAL ─────────────────── -->
+<div id="ai-modal">
+  <div class="ai-backdrop" onclick="aiClose()"></div>
+  <div class="ai-panel" role="dialog" aria-label="AI Designer">
+    <div class="ai-head">
+      <span class="ai-title">&#x2726; AI Designer <span class="ai-beta">beta</span></span>
+      <div style="flex:1"></div>
+      <button class="ai-x" onclick="aiClose()" title="Close">&#x2715;</button>
+    </div>
+    <div id="ai-body"></div>
+  </div>
+</div>
+
 <script src="state.js"></script>
 <script src="elements.js"></script>
 <script src="canvas.js"></script>
 <script src="interaction.js"></script>
 <script src="properties.js"></script>
 <script src="codegen.js"></script>
+<script src="ai.js"></script>
 <script>
 /* ── TUTORIAL ─────────────────────────── */
 const TUT_STEPS = [

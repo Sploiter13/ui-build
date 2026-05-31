@@ -705,6 +705,58 @@ function updateProps() {
     <button class="btn" style="flex:1;font-size:10px" onclick="bZ('${el.id}',-999)">&#x2B07;Bot</button>
   </div></div>`;
 
+  // ── Animation (only when the experimental feature is enabled) ─────
+  // Smart per-type: lines/polylines get fade+slide only, hover only on interactive
+  // widgets, toggle only on switch/checkbox. The UI-wide knobs live on the root
+  // element (so the Settings tab stays clean), and the root's own Entrance/Exit IS
+  // the whole-menu open/close (it cascades to every child).
+  if (SETTINGS.animExperimental) {
+    const a = el.anim || EL_ANIM_DEFAULTS;
+    const aSel = (k, opts) => {
+      const cur = a[k] || 'none';
+      return `<select class="pi" onchange="spAnim('${el.id}','${k}',this.value)">
+        ${opts.map(o => `<option value="${o}"${cur === o ? ' selected' : ''}>${o}</option>`).join('')}
+      </select>`;
+    };
+    const aNum = (k, mn, mx, st) =>
+      `<input class="pi" type="number" min="${mn}" max="${mx}" step="${st}" value="${a[k] != null ? a[k] : 0}"
+        onchange="spAnim('${el.id}','${k}',+this.value)">`;
+    const isRoot = !el.parentId;
+
+    h += `<div class="pg"><div class="pgt">Animation</div>`;
+    if (isRoot)
+      h += `<div class="info pur">Root element — its Entrance / Exit play as the whole menu opening &amp; closing (every child follows).</div>`;
+    h += r('Entrance', aSel('entrance', animEntranceOpts(el.type)));
+    h += r('Exit',     aSel('exit',     animExitOpts(el.type)));
+    if (animHoverOK(el.type))  h += r('Hover',  aSel('hover',  ANIM_OPTS.hover));
+    if (animToggleOK(el.type)) h += r('Toggle', aSel('toggle', ANIM_OPTS.toggle));
+    h += r('Easing',       aSel('easing', ANIM_OPTS.easing));
+    h += r('Duration (s)', aNum('duration', 0, 10, 0.05));
+    h += r('Intensity',    aNum('intensity', 0, 3, 0.1));
+    h += `<div class="info">0 duration = the effect's natural timing.</div>`;
+    h += `</div>`;
+
+    if (isRoot) {
+      const ga = S.anim || (S.anim = defaultAnim());
+      const gSel = (k, opts) =>
+        `<select class="pi" onchange="setAnim('${k}',this.value)">
+          ${opts.map(o => `<option value="${o}"${ga[k] === o ? ' selected' : ''}>${o}</option>`).join('')}
+        </select>`;
+      const gNum = (k, mn, mx, st) =>
+        `<input class="pi" type="number" min="${mn}" max="${mx}" step="${st}" value="${ga[k]}"
+          onchange="setAnim('${k}',+this.value)">`;
+      const gChk = k =>
+        `<input class="pi" type="checkbox" ${ga[k] ? 'checked' : ''} onchange="setAnim('${k}',this.checked)">`;
+      h += `<div class="pg"><div class="pgt">UI Animation (global)</div>`;
+      h += r('Speed',          gNum('speed', 0.1, 4, 0.1));
+      h += r('Intensity',      gNum('intensity', 0, 3, 0.1));
+      h += r('Reduced Motion', gChk('reducedMotion'));
+      h += r('Tab Transition', gSel('tabTransition', ANIM_OPTS.tabTransition));
+      h += `<div class="info">Applies to the whole menu. Reduced Motion collapses every effect to a quick fade.</div>`;
+      h += `</div>`;
+    }
+  }
+
   panel.innerHTML = h;
 
   panel.querySelectorAll('.cbody').forEach(ta => {
