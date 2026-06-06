@@ -475,14 +475,28 @@ function emitPostLocalInteractive(L, sorted, vn, needsDestroy) {
 
   L.push('');
   L.push('    do');
+  if (pollingWidgets.length > 0)
+    L.push('        local function _noopWait(_: number?) end  -- legacy wait() in a toggle body is now a no-op (callbacks are edge-triggered, not per-frame)');
   for (const el of pollingWidgets) {
-    const v = vn(el);
-    L.push(`        local _wt${v}: number = 0`);
-    L.push(`        local function _wait${v}(s: number) _wt${v} = os.clock() + s end`);
+    const v        = vn(el);
+    const stateVar = el.type === 'Checkbox' ? `${v}Checked`
+                   : el.type === 'Switch'   ? `${v}Enabled`
+                   :                          `${v}Toggled`;
+    L.push(`        local _prev${v}: boolean = E.${stateVar}  -- edge-trigger tracker: fire the callback only when the state actually changes`);
   }
   L.push(`${postConnPre}RunService.PostLocal:Connect(function()`);
   L.push('            if not isrbxactive() then return end');
 
+  // Dispatch user callbacks on their OWN thread via task.spawn — NOT a direct
+  // call. User callback bodies may yield (game:HttpGet, loadstring of an
+  // external script, task.wait). Yielding inside a RunService callback stalls
+  // Severe's frame dispatch and desyncs the immediate-mode Render cadence →
+  // the whole overlay flickers. task.spawn runs the body immediately but on a
+  // detached thread, so any yield happens "outside" PreLocal/PostLocal. The
+  // E.<v>Fired flag is still cleared synchronously and the args are captured at
+  // spawn time, so on/off control (e.g. writing _G.* toggles) is unaffected.
+  // DO NOT collapse these back to a plain On<v>...() call — that reintroduces
+  // the flicker whenever a callback runs an external/loadstring script.
   for (const el of eventWidgets) {
     const v  = vn(el);
     const cb = el.callback;
@@ -490,31 +504,42 @@ function emitPostLocalInteractive(L, sorted, vn, needsDestroy) {
     if (el.type === 'Dropdown') {
       L.push(`                local _i: number = E.${v}FiredIdx`);
       L.push(`                E.${v}Fired = false`);
-      L.push(`                On${v}${cb}(E.${v}Selected, _i)`);
+      L.push(`                task.spawn(On${v}${cb}, E.${v}Selected, _i)`);
     } else if (el.type === 'Keybind') {
       L.push(`                E.${v}Fired = false`);
-      L.push(`                On${v}${cb}(E.${v}Key)`);
+      L.push(`                task.spawn(On${v}${cb}, E.${v}Key)`);
     } else if (el.type === 'Slider') {
       L.push(`                E.${v}Fired = false`);
-      L.push(`                On${v}${cb}(E.${v}Value)`);
+      L.push(`                task.spawn(On${v}${cb}, E.${v}Value)`);
     } else if (el.type === 'Button') {
       L.push(`                E.${v}Fired = false`);
-      L.push(`                On${v}${cb}()`);
+      L.push(`                task.spawn(On${v}${cb})`);
     }
     L.push(`            end`);
   }
 
+  // Toggle callbacks (Checkbox / Switch / toggle-Button) are EDGE-TRIGGERED:
+  // they fire ONCE when the state changes — both directions — with `state` set
+  // to the real new value. The previous model ran the body EVERY frame while on,
+  // which turned a user's `_G.x = not _G.x` into a ~60Hz strobe that flickered
+  // anything gated on it (ESP boxes, etc.). The body runs on its own thread
+  // (task.spawn) so a toggle may safely load/stop an external script without
+  // stalling the frame; `_prev<v>` is updated synchronously before the spawn so
+  // edge detection stays correct even if the body yields.
   for (const el of pollingWidgets) {
     const v        = vn(el);
     const stateVar = el.type === 'Checkbox' ? `${v}Checked`
                    : el.type === 'Switch'   ? `${v}Enabled`
                    :                          `${v}Toggled`;
     L.push('');
-    L.push(`            if E.${stateVar} and os.clock() >= _wt${v} then`);
-    L.push(`                local state: boolean = true`);
-    L.push(`                local wait = _wait${v}`);
+    L.push(`            if E.${stateVar} ~= _prev${v} then`);
+    L.push(`                local state: boolean = E.${stateVar}`);
+    L.push(`                _prev${v} = state`);
+    L.push(`                task.spawn(function()`);
+    L.push(`                    local wait = _noopWait`);
     for (const line of (el.callbackBody || '').trimEnd().split('\n'))
-      L.push(`                ${line}`);
+      L.push(`                    ${line}`);
+    L.push(`                end)`);
     L.push(`            end`);
   }
 
